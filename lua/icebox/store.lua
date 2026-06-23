@@ -1,0 +1,229 @@
+local M = {}
+
+local validate = require("icebox.validate")
+local semver   = require("icebox.semver")
+
+local ZERO_HASH = "0000000000000000000000000000000000000000"
+
+-- Returns the directory where store files live.
+local function store_dir()
+  local xdg = vim.env.XDG_DATA_HOME
+  if not xdg or xdg == "" then
+    xdg = vim.fn.expand("~/.local/share")
+  end
+  return xdg .. "/icebox.nvim"
+end
+
+-- Returns path to the JSON file for a given URL.
+function M.path_for(url)
+  local sha = vim.fn.sha256(url)
+  return store_dir() .. "/" .. sha .. ".json"
+end
+
+-- Returns path to the lock file for a given URL.
+function M.lock_path_for(url)
+  return store_dir() .. "/locks/" .. vim.fn.sha256(url) .. ".lock"
+end
+
+-- Ensure a directory exists (synchronous).
+local function mkdir_p(dir)
+  vim.fn.mkdir(dir, "p")
+end
+
+-- Validate a single store table loaded from JSON. Strips invalid entries in-place.
+local function sanitize(data)
+  if type(data) ~= "table" then return {} end
+
+  -- default_branch
+  if data.default_branch ~= nil then
+    local ok = validate.branch(data.default_branch)
+    if not ok then data.default_branch = nil end
+  end
+
+  -- fetched_at
+  if type(data.fetched_at) ~= "table" then
+    data.fetched_at = {}
+  else
+    local clean = {}
+    for hash, ts in pairs(data.fetched_at) do
+      local ok_h = validate.commit_hash(hash)
+      if ok_h and type(ts) == "number" and ts > 0 and math.floor(ts) == ts then
+        clean[hash] = ts
+      end
+    end
+    data.fetched_at = clean
+  end
+
+  -- branches
+  if type(data.branches) ~= "table" then
+    data.branches = {}
+  else
+    local clean = {}
+    for branch, hashes in pairs(data.branches) do
+      local ok_b = validate.branch(branch)
+      if ok_b and type(hashes) == "table" then
+        local clean_hashes = {}
+        for _, h in ipairs(hashes) do
+          if validate.commit_hash(h) then
+            clean_hashes[#clean_hashes + 1] = h
+          end
+        end
+        clean[branch] = clean_hashes
+      end
+    end
+    data.branches = clean
+  end
+
+  -- tags
+  if type(data.tags) ~= "table" then
+    data.tags = {}
+  else
+    local clean = {}
+    for tag, hash in pairs(data.tags) do
+      if type(tag) == "string" and validate.commit_hash(hash) then
+        clean[tag] = hash
+      end
+    end
+    data.tags = clean
+  end
+
+  return data
+end
+
+-- Read and return the store table for a URL. Returns a fresh empty table if not found.
+function M.read(url)
+  local path = M.path_for(url)
+  local f = io.open(path, "r")
+  if not f then
+    return { fetched_at = {}, branches = {}, tags = {} }
+  end
+  local raw = f:read("*a")
+  f:close()
+  local ok, data = pcall(vim.json.decode, raw)
+  if not ok or type(data) ~= "table" then
+    return { fetched_at = {}, branches = {}, tags = {} }
+  end
+  return sanitize(data)
+end
+
+-- Write the store table for a URL atomically.
+function M.write(url, data)
+  local path  = M.path_for(url)
+  local dir   = vim.fn.fnamemodify(path, ":h")
+  -- Guard against path traversal
+  local real_dir = vim.fn.fnamemodify(dir, ":p"):gsub("/$", "")
+  local expected = vim.fn.fnamemodify(store_dir(), ":p"):gsub("/$", "")
+  if real_dir ~= expected then
+    return false, "store path outside expected directory"
+  end
+  mkdir_p(dir)
+
+  local encoded = vim.json.encode(data)
+  local tmp = path .. ".tmp"
+  local f, err = io.open(tmp, "w")
+  if not f then
+    return false, "cannot open tmp file: " .. (err or "")
+  end
+  f:write(encoded)
+  f:close()
+
+  -- Set permissions on tmp before rename
+  vim.uv.fs_chmod(tmp, tonumber("600", 8))
+
+  local ok, rename_err = vim.uv.fs_rename(tmp, path)
+  if not ok then
+    return false, "rename failed: " .. (rename_err or "")
+  end
+
+  -- Ensure permissions on final file (new file may have inherited umask)
+  vim.uv.fs_chmod(path, tonumber("600", 8))
+  return true
+end
+
+-- Returns true if fetched_at has at least one entry.
+function M.has_records(data)
+  return next(data.fetched_at) ~= nil
+end
+
+-- Returns true if store.tags has at least one semver tag.
+function M.has_semver_tags(data)
+  for tag, _ in pairs(data.tags) do
+    if semver.is_semver_tag(tag) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Merge new data into existing store data. Mutates and returns `existing`.
+-- new_data fields:
+--   default_branch  (string, optional)
+--   fetched_at      (table hash->ts, additive, no overwrite)
+--   branches        (table name->hashes, full overwrite per branch)
+--   tags            (table name->hash, overwrite on change)
+function M.merge(existing, new_data)
+  if new_data.default_branch ~= nil then
+    existing.default_branch = new_data.default_branch
+  end
+
+  if type(new_data.fetched_at) == "table" then
+    for hash, ts in pairs(new_data.fetched_at) do
+      if existing.fetched_at[hash] == nil then
+        existing.fetched_at[hash] = ts
+      end
+    end
+  end
+
+  if type(new_data.branches) == "table" then
+    for branch, hashes in pairs(new_data.branches) do
+      existing.branches[branch] = hashes
+    end
+  end
+
+  if type(new_data.tags) == "table" then
+    for tag, hash in pairs(new_data.tags) do
+      existing.tags[tag] = hash
+    end
+  end
+
+  return existing
+end
+
+-- Try to acquire a lock for a URL. Returns true if acquired.
+-- Writes current PID to the lock file.
+function M.lock(url)
+  local lock_path = M.lock_path_for(url)
+  mkdir_p(vim.fn.fnamemodify(lock_path, ":h"))
+
+  -- Check existing lock
+  local f = io.open(lock_path, "r")
+  if f then
+    local pid_str = f:read("*a")
+    f:close()
+    local pid = tonumber(pid_str)
+    if pid then
+      -- Check if process is alive (kill -0)
+      local result = vim.system({ "kill", "-0", tostring(pid) }, { text = true }):wait()
+      if result.code == 0 then
+        return false  -- lock held by live process
+      end
+    end
+    -- Stale lock: fall through to overwrite
+  end
+
+  local wf, err = io.open(lock_path, "w")
+  if not wf then
+    return false
+  end
+  wf:write(tostring(vim.uv.os_getpid()))
+  wf:close()
+  return true
+end
+
+-- Release the lock for a URL.
+function M.unlock(url)
+  local lock_path = M.lock_path_for(url)
+  os.remove(lock_path)
+end
+
+return M
