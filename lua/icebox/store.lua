@@ -3,8 +3,6 @@ local M = {}
 local validate = require("icebox.validate")
 local semver   = require("icebox.semver")
 
-local ZERO_HASH = "0000000000000000000000000000000000000000"
-
 -- Returns the directory where store files live.
 local function store_dir()
   local xdg = vim.env.XDG_DATA_HOME
@@ -80,7 +78,7 @@ local function sanitize(data)
   else
     local clean = {}
     for tag, hash in pairs(data.tags) do
-      if type(tag) == "string" and validate.commit_hash(hash) then
+      if validate.tag(tag) and validate.commit_hash(hash) then
         clean[tag] = hash
       end
     end
@@ -195,28 +193,27 @@ function M.lock(url)
   local lock_path = M.lock_path_for(url)
   mkdir_p(vim.fn.fnamemodify(lock_path, ":h"))
 
-  -- Check existing lock
-  local f = io.open(lock_path, "r")
-  if f then
-    local pid_str = f:read("*a")
-    f:close()
-    local pid = tonumber(pid_str)
+  -- Attempt atomic create (O_CREAT|O_EXCL equivalent via "wx" flag).
+  local fd = vim.uv.fs_open(lock_path, "wx", tonumber("600", 8))
+  if not fd then
+    -- File already exists: check whether the owning process is still alive.
+    local rf = io.open(lock_path, "r")
+    if not rf then return false end
+    local pid = tonumber(rf:read("*a")); rf:close()
     if pid then
-      -- Check if process is alive (kill -0)
-      local result = vim.system({ "kill", "-0", tostring(pid) }, { text = true }):wait()
-      if result.code == 0 then
-        return false  -- lock held by live process
+      -- vim.uv.kill with signal 0 tests liveness without sending a signal.
+      if vim.uv.kill(pid, 0) == 0 then
+        return false  -- live process holds the lock
       end
     end
-    -- Stale lock: fall through to overwrite
+    -- Stale lock: remove and retry once.
+    os.remove(lock_path)
+    fd = vim.uv.fs_open(lock_path, "wx", tonumber("600", 8))
+    if not fd then return false end
   end
 
-  local wf, err = io.open(lock_path, "w")
-  if not wf then
-    return false
-  end
-  wf:write(tostring(vim.uv.os_getpid()))
-  wf:close()
+  vim.uv.fs_write(fd, tostring(vim.uv.os_getpid()))
+  vim.uv.fs_close(fd)
   return true
 end
 

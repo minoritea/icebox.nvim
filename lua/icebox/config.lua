@@ -16,7 +16,7 @@ function M.set(opts)
 end
 
 function M.get()
-  return _cfg
+  return vim.deepcopy(_cfg)
 end
 
 return M

@@ -86,34 +86,12 @@ function M.parse_range(s)
   return nil, "cannot parse version range: '" .. s .. "'"
 end
 
--- Returns true if tag_name satisfies range_str.
--- tag_name may have a leading "v". range_str is a range string.
-function M.matches(tag_name, range_str)
-  local pred, err = M.parse_range(range_str)
-  if not pred then
-    return false
-  end
-  local ver = parse_version(tag_name)
-  if not ver then return false end
-  return pred(ver)
-end
-
 -- Returns true if tag_a > tag_b (semver comparison).
 function M.gt(tag_a, tag_b)
   local a = parse_version(tag_a)
   local b = parse_version(tag_b)
   if not a or not b then return false end
   return cmp(a, b) > 0
-end
-
--- Returns true if s looks like a semver range (used for branch-vs-version detection).
-function M.is_range(s)
-  if type(s) ~= "string" then return false end
-  -- If it starts with ^, ~, >, <, =, or contains digits and dots without slashes
-  if s:match("^[%^~><=]") then return true end
-  -- bare version like "1.2.3"
-  if s:match("^v?%d+%.%d+") then return true end
-  return false
 end
 
 -- Returns true if tag_name is a semver tag (with or without leading "v").

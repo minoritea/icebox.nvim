@@ -5,21 +5,27 @@ local store    = require("icebox.store")
 local git      = require("icebox.git")
 local resolver = require("icebox.resolver")
 local validate = require("icebox.validate")
-local semver   = require("icebox.semver")
 
-local ZERO_HASH = "0000000000000000000000000000000000000000"
+-- The zero hash is returned when no cooled commit is available yet.
+M.ZERO_HASH = validate.ZERO_HASH
+local ZERO_HASH = M.ZERO_HASH
 
 local function warn(msg)
   vim.notify("[icebox] " .. msg, vim.log.levels.WARN)
 end
 
+--- Configure icebox.nvim. Call once during startup (e.g. in lazy.nvim's config).
+--- Defaults apply if setup() is never called:
+---   cooldown_days      = 7      (0 disables cooldown)
+---   trust_on_first_use = false
+--- setup() may be called multiple times; later calls override earlier ones.
 function M.setup(opts)
   config.set(opts or {})
 end
 
 -- ─── Background fetch ────────────────────────────────────────────────────────
 
-local function bg_fetch(url, opts)
+local function bg_fetch(url, opts, default_branch_unknown)
   if not store.lock(url) then
     return  -- another process holds the lock for this URL
   end
@@ -43,13 +49,15 @@ local function bg_fetch(url, opts)
     git.fetch_branch_async(url, opts.branch, finish)
   elseif opts.tag or opts.version then
     git.fetch_tags_async(url, finish)
+  elseif default_branch_unknown then
+    git.fetch_branch_async(url, nil, finish)
   end
   -- commit opts: no background fetch
 end
 
 -- ─── Resolve logic ───────────────────────────────────────────────────────────
 
-function M.resolve(url, opts)
+function M.thaw(url, opts)
   -- 1. Validate URL
   local url_ok, url_err = validate.url(url)
   if not url_ok then
@@ -57,7 +65,7 @@ function M.resolve(url, opts)
     return ZERO_HASH
   end
 
-  -- 2. Parse opts
+  -- 2. Parse opts (version range validated inside validate.opts)
   local parsed_opts, opts_err = validate.opts(opts)
   if not parsed_opts then
     warn(opts_err or "invalid opts")
@@ -74,6 +82,9 @@ function M.resolve(url, opts)
 
   -- 4. Resolve default opts if none of branch/tag/version/commit specified
   local resolved_kind = opts.branch or opts.tag or opts.version or opts.commit
+  -- default_branch_unknown: branch not specified and not yet cached in store.
+  -- Kept as a local so it never leaks into the opts table.
+  local default_branch_unknown = false
   if not resolved_kind then
     if store.has_semver_tags(data) then
       opts = vim.tbl_extend("keep", opts, { version = ">=0.0.0" })
@@ -81,11 +92,8 @@ function M.resolve(url, opts)
       if data.default_branch then
         opts = vim.tbl_extend("keep", opts, { branch = data.default_branch })
       else
-        -- Need default branch: if trust_on_first_use, the sync fetch below
-        -- will clone without --branch and resolve it. Otherwise fetch async.
         if not cfg.trust_on_first_use then
           -- Launch BG fetch which will populate default_branch + tags
-          -- Use a temporary sentinel opts to drive fetch_tags_async
           vim.schedule(function()
             if not store.lock(url) then return end
             git.fetch_tags_async(url, function(new_data, err)
@@ -103,9 +111,8 @@ function M.resolve(url, opts)
           end)
           return ZERO_HASH
         end
-        -- trust_on_first_use=true: fall through to sync fetch with branch=nil
-        -- git.fetch_branch_sync with branch=nil clones default branch
-        opts = vim.tbl_extend("keep", opts, { branch = nil, _default_branch_unknown = true })
+        -- trust_on_first_use=true: sync fetch with branch=nil clones default branch
+        default_branch_unknown = true
       end
     end
   end
@@ -121,43 +128,34 @@ function M.resolve(url, opts)
     return result or resolver.fallback(opts)
   end
 
-  -- 6. Validate version range (semver.lua)
-  if opts.version then
-    local _, range_err = semver.parse_range(opts.version)
-    if range_err then
-      warn("invalid version range: " .. (range_err or ""))
-      return ZERO_HASH
-    end
-  end
-
-  -- 7. Main resolve from store
+  -- 6. Main resolve from store
   if store.has_records(data) then
     local result = resolver.resolve(data, opts, cooldown_sec, now)
     if result then
-      vim.schedule(function() bg_fetch(url, opts) end)
+      vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
       return result
     end
-    vim.schedule(function() bg_fetch(url, opts) end)
+    vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
     return resolver.fallback(opts)
   end
 
-  -- 8. fetched_at is empty (first time for this URL)
+  -- 7. fetched_at is empty (first time for this URL)
   if not cfg.trust_on_first_use then
-    vim.schedule(function() bg_fetch(url, opts) end)
+    vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
     return ZERO_HASH
   end
 
   -- trust_on_first_use=true
   if opts.trusted_commit then
-    vim.schedule(function() bg_fetch(url, opts) end)
+    vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
     return opts.trusted_commit
   end
 
   -- Synchronous fetch
   local new_data, fetch_err
-  if opts.branch or opts._default_branch_unknown then
+  if opts.branch or default_branch_unknown then
     new_data, fetch_err = git.fetch_branch_sync(url, opts.branch)
-    if new_data and new_data.default_branch and opts._default_branch_unknown then
+    if new_data and new_data.default_branch and default_branch_unknown then
       opts.branch = new_data.default_branch
     end
   else
@@ -174,35 +172,17 @@ function M.resolve(url, opts)
   store.merge(data, new_data)
   store.write(url, data)
 
-  -- Return newest match (no cooldown filter for trust_on_first_use)
+  -- Return newest match without cooldown filter (trust_on_first_use path).
+  -- Reuse resolver with cooldown_sec=0 so all fetched entries are eligible.
   if opts.branch then
-    local hashes = data.branches and data.branches[opts.branch]
-    if hashes and hashes[1] then return hashes[1] end
+    local result = resolver.resolve_branch(data, opts.branch, 0, math.huge)
+    if result then return result end
   elseif opts.version then
-    -- find highest semver tag regardless of cooldown
-    local has_v = false
-    for tag, _ in pairs(data.tags) do
-      if tag:sub(1,1) == "v" and semver.is_semver_tag(tag) then has_v = true; break end
-    end
-    local pred = semver.parse_range(opts.version)
-    local best_tag, best_hash = nil, nil
-    for tag, hash in pairs(data.tags) do
-      if semver.is_semver_tag(tag) then
-        if has_v and tag:sub(1,1) ~= "v" then goto skip end
-        if pred and pred({ tonumber(tag:gsub("^v",""):match("^(%d+)")),
-                           tonumber(tag:gsub("^v",""):match("^%d+%.(%d+)")),
-                           tonumber(tag:gsub("^v",""):match("^%d+%.%d+%.(%d+)") or "0") }) then
-          if best_tag == nil or semver.gt(tag, best_tag) then
-            best_tag = tag; best_hash = hash
-          end
-        end
-      end
-      ::skip::
-    end
-    if best_hash then return best_hash end
+    local result = resolver.resolve_version(data, opts.version, 0, math.huge)
+    if result then return result end
   elseif opts.tag then
-    local hash = data.tags and data.tags[opts.tag]
-    if hash then return hash end
+    local result = resolver.resolve_tag(data, opts.tag, 0, math.huge)
+    if result then return result end
   end
 
   return ZERO_HASH

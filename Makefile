@@ -4,4 +4,4 @@ test:
 	@sh tests/run_tests.sh
 
 clean:
-	@rm -rf tests/xdg
+	@rm -rf tests/xdg tests/fixtures

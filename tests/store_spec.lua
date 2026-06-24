@@ -73,7 +73,11 @@ do
       ["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 2000,
     },
     branches = { main = { "BADHASH", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" } },
-    tags = { ["v1.0.0"] = "BADHASH" },
+    tags = {
+      ["v1.0.0"] = "BADHASH",
+      ["../evil"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      ["v2.0.0"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    },
   }))
   f:close()
 
@@ -83,6 +87,9 @@ do
        "valid hash in fetched_at kept")
   h.eq(#data.branches["main"], 1,                       "bad hash in branch stripped")
   h.is_nil(data.tags["v1.0.0"],                         "bad hash in tags stripped")
+  h.is_nil(data.tags["../evil"],                        "bad tag name stripped")
+  h.eq(data.tags["v2.0.0"], "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+       "valid tag kept")
   clean()
 end
 
@@ -100,6 +107,31 @@ do
   h.is_true(after_unlock, "lock after unlock succeeds")
   store.unlock(TEST_URL)
   clean()
+end
+
+h.suite("store.has_records / has_semver_tags")
+do
+  local empty = { fetched_at = {}, branches = {}, tags = {} }
+  h.is_false(store.has_records(empty),     "empty store has no records")
+  h.is_false(store.has_semver_tags(empty), "empty store has no semver tags")
+
+  local with_commit = {
+    fetched_at = { ["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 1000 },
+    branches   = {},
+    tags       = {},
+  }
+  h.is_true(store.has_records(with_commit),     "store with commit hash has records")
+  h.is_false(store.has_semver_tags(with_commit), "store with no tags has no semver tags")
+
+  -- has_records=true but default_branch=nil and no semver tags:
+  -- this is the edge case from B1 where bg_fetch must still fire.
+  local no_branch_no_tags = {
+    fetched_at = { ["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 1000 },
+    branches   = {},
+    tags       = { ["not-semver"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" },
+  }
+  h.is_true(store.has_records(no_branch_no_tags),     "has_records true without branch")
+  h.is_false(store.has_semver_tags(no_branch_no_tags), "non-semver tag not counted")
 end
 
 h.summary()

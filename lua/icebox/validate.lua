@@ -1,5 +1,9 @@
 local M = {}
 
+local semver = require("icebox.semver")
+
+M.ZERO_HASH = "0000000000000000000000000000000000000000"
+
 local ALLOWED_SCHEMES = {
   ["https"] = true,
   ["http"] = true,
@@ -112,10 +116,8 @@ function M.opts(opts)
     local ok, err = M.tag(opts.tag)
     if not ok then return nil, "opts.tag: " .. err end
   elseif kind == "version" then
-    -- semver parsing is done by semver.lua; just check it's a string here
-    if type(opts.version) ~= "string" then
-      return nil, "opts.version must be a string"
-    end
+    local _, range_err = semver.parse_range(opts.version)
+    if range_err then return nil, "opts.version: " .. range_err end
   elseif kind == "commit" then
     local ok, err = M.commit_hash(opts.commit)
     if not ok then return nil, "opts.commit: " .. err end

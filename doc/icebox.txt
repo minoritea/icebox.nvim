@@ -1,0 +1,288 @@
+*icebox.txt*  Cooldown-based commit resolver for Neovim
+
+Author:   Minori Tokuda <snowcrush@mail.0pt.jp>
+License:  MIT
+Homepage: https://github.com/mt/icebox.nvim
+
+==============================================================================
+CONTENTS                                                      *icebox-contents*
+
+  1. Introduction ....................................... |icebox-introduction|
+  2. Requirements ....................................... |icebox-requirements|
+  3. Installation ....................................... |icebox-installation|
+  4. Concept ............................................ |icebox-concept|
+  5. Setup .............................................. |icebox-setup|
+  6. API ................................................ |icebox-api|
+     icebox.setup() .................................... |icebox.setup()|
+     icebox.thaw() ..................................... |icebox.thaw()|
+     icebox.ZERO_HASH .................................. |icebox.ZERO_HASH|
+  7. Options ............................................ |icebox-options|
+  8. thaw() opts ........................................ |icebox-thaw-opts|
+  9. Examples ........................................... |icebox-examples|
+ 10. FAQ ................................................ |icebox-faq|
+
+==============================================================================
+1. INTRODUCTION                                           *icebox-introduction*
+
+icebox.nvim provides cooldown-based commit resolution for Neovim plugin
+managers. Given a Git repository URL and an optional version constraint, it
+returns the most recent commit hash that has been "in the icebox" (known to
+icebox.nvim) for at least a configurable number of days.
+
+The intended use case is wrapping a plugin manager's commit pinning mechanism
+so that newly released commits are not immediately adopted. A commit is only
+returned once its cooldown period has elapsed, giving time for bugs in new
+releases to surface in the community before they reach your configuration.
+
+==============================================================================
+2. REQUIREMENTS                                           *icebox-requirements*
+
+- Neovim >= 0.10
+- `git` available on PATH
+
+==============================================================================
+3. INSTALLATION                                           *icebox-installation*
+
+With lazy.nvim: >lua
+  {
+    "mt/icebox.nvim",
+    lazy = true,
+  }
+<
+With vim-plug: >vim
+  Plug 'mt/icebox.nvim'
+<
+icebox.nvim does not register any keymaps, autocommands, or commands by
+default. It is intended to be called programmatically from your plugin manager
+configuration.
+
+==============================================================================
+4. CONCEPT                                                    *icebox-concept*
+
+                           resolve request
+                                 │
+                     ┌───────────▼───────────┐
+                     │   local store (JSON)   │
+                     │  fetched_at per hash   │
+                     └───────────┬───────────┘
+                                 │
+                    fetched_at + cooldown_days <= now?
+                           │              │
+                          yes             no
+                           │              │
+                     return hash    return ZERO_HASH
+                                   (+ schedule BG fetch)
+
+On the first call for a URL the store is empty. If `trust_on_first_use` is
+false (the default), icebox.nvim returns |icebox.ZERO_HASH| and schedules a
+background fetch so that subsequent Neovim startups can resolve a hash.
+
+If `trust_on_first_use` is true, a synchronous fetch is performed on the
+first call so that a hash is returned immediately. This blocks startup
+briefly but ensures a usable result on the very first run.
+
+Store files are kept in `$XDG_DATA_HOME/icebox.nvim/` (defaulting to
+`~/.local/share/icebox.nvim/`), one JSON file per repository URL.
+
+==============================================================================
+5. SETUP                                                        *icebox-setup*
+
+Call |icebox.setup()| once during Neovim startup, before any |icebox.thaw()|
+calls. If `setup()` is never called the default values described in
+|icebox-options| apply automatically.
+
+Example with lazy.nvim: >lua
+  require("icebox").setup({
+    cooldown_days      = 14,
+    trust_on_first_use = false,
+  })
+<
+==============================================================================
+6. API                                                            *icebox-api*
+
+------------------------------------------------------------------------------
+icebox.setup({opts})                                          *icebox.setup()*
+
+Configure icebox.nvim. Must be called before |icebox.thaw()| if non-default
+values are desired. May be called multiple times; later calls override earlier
+ones for the keys provided. Keys not present in {opts} retain their current
+value.
+
+Parameters:
+  {opts}  (table) Configuration table. See |icebox-options|.
+
+------------------------------------------------------------------------------
+icebox.thaw({url}, {opts})                                    *icebox.thaw()*
+
+Resolve a cooled-down commit hash for the given repository URL.
+
+Returns a 40-character lowercase hex commit hash. If no cooled commit is
+available yet, returns |icebox.ZERO_HASH|. Never returns `nil`.
+
+Check the return value against |icebox.ZERO_HASH| to detect the "not ready"
+state: >lua
+  local hash = icebox.thaw(url)
+  if hash == icebox.ZERO_HASH then
+    -- no cooled commit yet; pin to a known-good hash or skip pinning
+  end
+<
+Parameters:
+  {url}   (string) Git repository URL. Supported schemes: `https`, `http`,
+          `ssh`, `git`, `git+ssh`, `file`, and the `git@host:path` shorthand.
+
+  {opts}  (table|nil) Optional. See |icebox-thaw-opts|. At most one of
+          `branch`, `tag`, `version`, or `commit` may be specified.
+
+          If no key is specified, icebox.nvim uses the following heuristic:
+          - If the store contains semver tags, behaves as `version = ">=0.0.0"`
+            (newest cooled semver release).
+          - Otherwise, behaves as `branch = <default_branch>`.
+
+Return:   (string) A 40-character commit hash, or |icebox.ZERO_HASH|.
+
+------------------------------------------------------------------------------
+icebox.ZERO_HASH                                            *icebox.ZERO_HASH*
+
+The sentinel value returned by |icebox.thaw()| when no cooled commit is
+available. Its value is: >
+  "0000000000000000000000000000000000000000"
+<
+Use this constant instead of a hard-coded string to check whether thaw()
+produced a usable result: >lua
+  if hash ~= require("icebox").ZERO_HASH then
+    -- safe to use hash
+  end
+<
+==============================================================================
+7. OPTIONS                                                    *icebox-options*
+
+Options are passed to |icebox.setup()|.
+
+cooldown_days                                          *icebox-opt-cooldown*
+  Type:    number
+  Default: 7
+
+  Number of days a commit must be known to icebox.nvim before it is returned
+  by |icebox.thaw()|. Set to `0` to disable cooldown entirely (every known
+  commit is immediately eligible).
+
+trust_on_first_use                            *icebox-opt-trust-on-first-use*
+  Type:    boolean
+  Default: false
+
+  Controls behaviour on the very first call for a URL (when the local store
+  is empty).
+
+  false  Return |icebox.ZERO_HASH| and schedule a background fetch. On the
+         next Neovim startup the fetched data will be available and the
+         cooldown clock starts.
+
+  true   Perform a synchronous git fetch during the |icebox.thaw()| call and
+         return the newest matching commit immediately, bypassing the cooldown
+         for that first result only. Subsequent calls go through the normal
+         cooldown path.
+
+==============================================================================
+8. THAW() OPTS                                              *icebox-thaw-opts*
+
+The second argument to |icebox.thaw()| is an optional table. At most one of
+`branch`, `tag`, `version`, or `commit` may be set.
+
+branch                                              *icebox-thaw-opt-branch*
+  Type: string
+  Track the tip of a branch. Returns the newest commit on that branch whose
+  cooldown has elapsed. >lua
+    icebox.thaw(url, { branch = "main" })
+<
+tag                                                    *icebox-thaw-opt-tag*
+  Type: string
+  Pin to a specific tag name. Returns the commit the tag points to if its
+  cooldown has elapsed. >lua
+    icebox.thaw(url, { tag = "v1.2.3" })
+<
+version                                            *icebox-thaw-opt-version*
+  Type: string
+  Semver range. Returns the highest-versioned tag matching the range whose
+  cooldown has elapsed. Supported operators: `^`, `~`, `>=`, `>`, `<=`, `<`,
+  and exact version strings. A leading `v` on tag names is handled
+  automatically. >lua
+    icebox.thaw(url, { version = "^1.0.0" })
+    icebox.thaw(url, { version = ">=2.0.0" })
+    icebox.thaw(url, { version = "~1.4.0" })
+<
+commit                                              *icebox-thaw-opt-commit*
+  Type: string (40-char hex)
+  Pin to a specific commit hash. The cooldown clock starts from the first
+  time this hash is seen by icebox.nvim. No network fetch is performed. >lua
+    icebox.thaw(url, { commit = "a1b2c3..." })
+<
+trusted_commit                              *icebox-thaw-opt-trusted-commit*
+  Type: string (40-char hex)
+  Fallback hash returned instead of |icebox.ZERO_HASH| when no cooled commit
+  is available. Useful for providing a known-good baseline on first use
+  without enabling `trust_on_first_use` globally. >lua
+    icebox.thaw(url, {
+      version        = "^1.0.0",
+      trusted_commit = "a1b2c3...",  -- returned until a cooled tag exists
+    })
+<
+==============================================================================
+9. EXAMPLES                                                  *icebox-examples*
+
+Basic usage with lazy.nvim: >lua
+  -- In your lazy.nvim plugin spec, replace a hard-coded commit with thaw():
+  local icebox = require("icebox")
+
+  icebox.setup({ cooldown_days = 7 })
+
+  return {
+    {
+      "nvim-telescope/telescope.nvim",
+      commit = icebox.thaw("https://github.com/nvim-telescope/telescope.nvim"),
+    },
+  }
+<
+Track a branch with a trusted fallback: >lua
+  commit = icebox.thaw(url, {
+    branch         = "main",
+    trusted_commit = "d3adb33f...",
+  })
+<
+Pin to a semver range: >lua
+  commit = icebox.thaw(url, { version = "^0.9.0" })
+<
+Pin to an exact tag: >lua
+  commit = icebox.thaw(url, { tag = "v0.9.5" })
+<
+Disable cooldown for a specific plugin (always use newest known commit): >lua
+  icebox.setup({ cooldown_days = 0 })
+  commit = icebox.thaw(url)
+<
+==============================================================================
+10. FAQ                                                          *icebox-faq*
+
+Q: thaw() always returns the zero hash. What is happening?
+A: On the first call for a URL, the local store is empty. icebox.nvim
+   schedules a background fetch and returns |icebox.ZERO_HASH|. Restart
+   Neovim once after installation; the fetch will have completed and a real
+   hash will be returned from the second startup onward.
+   If you need a result on the very first run, set `trust_on_first_use = true`
+   or supply a `trusted_commit` in the opts.
+
+Q: Where are store files kept?
+A: In `$XDG_DATA_HOME/icebox.nvim/` (default: `~/.local/share/icebox.nvim/`).
+   One JSON file is created per repository URL, named by the SHA-256 of the
+   URL. It is safe to delete these files; icebox.nvim will re-fetch on the
+   next startup.
+
+Q: Does icebox.nvim slow down Neovim startup?
+A: Only when `trust_on_first_use = true` and the store is empty for a URL.
+   In all other cases, git operations run in the background after startup
+   completes and do not block the UI.
+
+Q: Can I use icebox.nvim with plugin managers other than lazy.nvim?
+A: Yes. |icebox.thaw()| returns a plain commit hash string, so it works with
+   any plugin manager that accepts a commit hash (vim-plug, packer.nvim, etc.).
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:

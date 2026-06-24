@@ -157,10 +157,12 @@ local function spawn_async(cmd, callback)
   local stdout_pipe = vim.uv.new_pipe()
   local stderr_pipe = vim.uv.new_pipe()
 
-  local exe = table.remove(cmd, 1)
+  local exe = cmd[1]
+  local args = {}
+  for i = 2, #cmd do args[#args + 1] = cmd[i] end
   local handle
   handle = vim.uv.spawn(exe, {
-    args   = cmd,
+    args   = args,
     stdio  = { nil, stdout_pipe, stderr_pipe },
   }, function(code, _signal)
     stdout_pipe:close()
