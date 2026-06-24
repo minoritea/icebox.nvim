@@ -11,7 +11,7 @@ local CLONE_SAFETY_ARGS = {
   "--filter=blob:none",
 }
 
--- Parse "git ls-remote --symref --tags" output.
+-- Parse "git ls-remote --symref" output (no ref filter → includes HEAD symref + all refs).
 -- Returns { default_branch=string|nil, tags={ name=hash } }
 local function parse_ls_remote_symref_tags(stdout)
   local result = { tags = {} }
@@ -128,7 +128,7 @@ end
 
 -- Fetch tags synchronously (for tag/version opts). Returns new_data or nil + err.
 function M.fetch_tags_sync(url)
-  local r = run_sync({ "git", "ls-remote", "--symref", "--tags", url })
+  local r = run_sync({ "git", "ls-remote", "--symref", url })
   if r.code ~= 0 then
     return nil, "git ls-remote failed: " .. (r.stderr or "")
   end
@@ -239,7 +239,7 @@ end
 -- Fetch tags asynchronously (covers tag + version opts, and default_branch).
 -- on_done(new_data, err) is called on completion.
 function M.fetch_tags_async(url, on_done)
-  local cmd = { "git", "ls-remote", "--symref", "--tags", url }
+  local cmd = { "git", "ls-remote", "--symref", url }
   spawn_async(cmd, function(code, stdout, stderr)
     if code ~= 0 then
       on_done(nil, "git ls-remote failed: " .. stderr)
