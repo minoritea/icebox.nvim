@@ -168,7 +168,9 @@ local function spawn_async(cmd, callback)
     stdout_pipe:close()
     stderr_pipe:close()
     handle:close()
-    callback(code, table.concat(stdout_chunks), table.concat(stderr_chunks))
+    vim.schedule(function()
+      callback(code, table.concat(stdout_chunks), table.concat(stderr_chunks))
+    end)
   end)
 
   if not handle then
