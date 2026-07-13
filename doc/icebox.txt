@@ -2,7 +2,7 @@
 
 Author:   Minori Tokuda <snowcrush@mail.0pt.jp>
 License:  MIT
-Homepage: https://github.com/mt/icebox.nvim
+Homepage: https://github.com/minoritea/icebox.nvim
 
 ==============================================================================
 CONTENTS                                                      *icebox-contents*
@@ -43,14 +43,15 @@ releases to surface in the community before they reach your configuration.
 ==============================================================================
 3. INSTALLATION                                           *icebox-installation*
 
-With lazy.nvim: >lua
-  {
-    "mt/icebox.nvim",
-    lazy = true,
-  }
+Clone the repository manually. icebox.nvim must be on the runtimepath before
+your plugin manager runs, so it cannot be managed by the plugin manager
+itself. >bash
+  git clone https://github.com/minoritea/icebox.nvim \
+    ~/.local/share/nvim/icebox.nvim
 <
-With vim-plug: >vim
-  Plug 'mt/icebox.nvim'
+Then prepend it to the runtimepath at the top of `init.lua`, before your
+plugin manager is loaded: >lua
+  vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/icebox.nvim")
 <
 icebox.nvim does not register any keymaps, autocommands, or commands by
 default. It is intended to be called programmatically from your plugin manager
@@ -91,7 +92,7 @@ Call |icebox.setup()| once during Neovim startup, before any |icebox.thaw()|
 calls. If `setup()` is never called the default values described in
 |icebox-options| apply automatically.
 
-Example with lazy.nvim: >lua
+Example: >lua
   require("icebox").setup({
     cooldown_days      = 14,
     trust_on_first_use = false,
@@ -229,8 +230,8 @@ trusted_commit                              *icebox-thaw-opt-trusted-commit*
 ==============================================================================
 9. EXAMPLES                                                  *icebox-examples*
 
-Basic usage with lazy.nvim: >lua
-  -- In your lazy.nvim plugin spec, replace a hard-coded commit with thaw():
+Basic usage: >lua
+  -- Replace a hard-coded commit with thaw() in your plugin manager config:
   local icebox = require("icebox")
 
   icebox.setup({ cooldown_days = 7 })

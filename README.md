@@ -11,9 +11,16 @@ icebox.nvim returns the most recent commit hash for a Git repository that has be
 
 ## Installation
 
+Clone the repository manually (icebox.nvim must be on the runtimepath before your plugin manager runs):
+
+```bash
+git clone https://github.com/minoritea/icebox.nvim ~/.local/share/nvim/icebox.nvim
+```
+
+Then add it to your runtimepath at the top of `init.lua`, before your plugin manager is loaded:
+
 ```lua
--- lazy.nvim
-{ "mt/icebox.nvim", lazy = true }
+vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/icebox.nvim")
 ```
 
 ## Usage
