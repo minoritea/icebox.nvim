@@ -14,7 +14,7 @@ function M.resolve(data, opts, cooldown_sec, now)
   elseif opts.tag then
     return M.resolve_tag(data, opts.tag, cooldown_sec, now)
   elseif opts.version then
-    return M.resolve_version(data, opts.version, cooldown_sec, now)
+    return M.resolve_version(data, opts.version, cooldown_sec, now, opts.normalize)
   elseif opts.commit then
     return M.resolve_commit(data, opts.commit, cooldown_sec, now)
   end
@@ -43,45 +43,37 @@ function M.resolve_tag(data, tag_name, cooldown_sec, now)
   return nil
 end
 
-function M.resolve_version(data, range_str, cooldown_sec, now)
+function M.resolve_version(data, range_str, cooldown_sec, now, normalize_fn)
   local pred, err = semver.parse_range(range_str)
   if not pred then return nil end
 
-  -- Determine whether this repo uses "v"-prefixed tags.
-  local has_v_prefix = false
+  normalize_fn = normalize_fn or semver.default_normalize
+
+  local tag_names = {}
   if data.tags then
     for tag, _ in pairs(data.tags) do
-      if tag:sub(1, 1) == "v" and semver.is_semver_tag(tag) then
-        has_v_prefix = true
-        break
-      end
+      tag_names[#tag_names + 1] = tag
     end
   end
 
-  local best_tag  = nil
+  local entries = normalize_fn(tag_names)
+
+  local best_ver  = nil
   local best_hash = nil
 
-  if data.tags then
-    for tag, hash in pairs(data.tags) do
-      -- Skip non-semver tags
-      if not semver.is_semver_tag(tag) then goto continue end
-      -- If repo has v-prefixed tags, skip non-v tags
-      if has_v_prefix and tag:sub(1, 1) ~= "v" then goto continue end
-
-      local fa = data.fetched_at[hash]
-      if fa and fa + cooldown_sec <= now then
-        local ver = tag:gsub("^v", "")
-        if pred({ tonumber(ver:match("^(%d+)")),
-                  tonumber(ver:match("^%d+%.(%d+)")),
-                  tonumber(ver:match("^%d+%.%d+%.(%d+)") or "0") }) then
-          if best_tag == nil or semver.gt(tag, best_tag) then
-            best_tag  = tag
-            best_hash = hash
-          end
+  for tag, version in pairs(entries) do
+    local hash = data.tags[tag]
+    if not hash then goto continue end
+    local fa = data.fetched_at[hash]
+    if fa and fa + cooldown_sec <= now then
+      if pred(version) then
+        if best_ver == nil or semver.gt(tag, best_ver) then
+          best_ver  = tag
+          best_hash = hash
         end
       end
-      ::continue::
     end
+    ::continue::
   end
 
   return best_hash

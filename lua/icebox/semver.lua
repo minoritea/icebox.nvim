@@ -1,10 +1,16 @@
 local M = {}
 
--- Parse a version string like "1.2.3" or "v1.2.3".
--- Returns { major, minor, patch } or nil.
+-- Parse a version string like "1.2.3", "v1.2.3", or "1.2.3-alpha".
+-- Returns { major, minor, patch [, suffix] } or nil.
 local function parse_version(s)
   s = s:gsub("^v", "")
-  local major, minor, patch = s:match("^(%d+)%.(%d+)%.(%d+)$")
+  -- X.Y.Z-suffix
+  local major, minor, patch, suffix = s:match("^(%d+)%.(%d+)%.(%d+)%-(.+)$")
+  if major then
+    return { tonumber(major), tonumber(minor), tonumber(patch), suffix }
+  end
+  -- X.Y.Z
+  major, minor, patch = s:match("^(%d+)%.(%d+)%.(%d+)$")
   if major then
     return { tonumber(major), tonumber(minor), tonumber(patch) }
   end
@@ -21,11 +27,18 @@ local function parse_version(s)
   return nil
 end
 
--- Compare two version tables. Returns -1, 0, or 1.
+-- Compare two version tables { major, minor, patch [, suffix] }. Returns -1, 0, or 1.
+-- Follows semver pre-release semantics: no suffix > has suffix for equal numeric parts.
 local function cmp(a, b)
   for i = 1, 3 do
     if a[i] < b[i] then return -1 end
     if a[i] > b[i] then return 1 end
+  end
+  if a[4] == nil and b[4] ~= nil then return 1 end
+  if a[4] ~= nil and b[4] == nil then return -1 end
+  if a[4] and b[4] then
+    if a[4] < b[4] then return -1 end
+    if a[4] > b[4] then return 1 end
   end
   return 0
 end
@@ -97,6 +110,35 @@ end
 -- Returns true if tag_name is a semver tag (with or without leading "v").
 function M.is_semver_tag(tag_name)
   return parse_version(tag_name) ~= nil
+end
+
+-- Default normalize function.
+-- Accepts a list of tag name strings and returns a map of
+-- { [tag_string] = { major, minor, patch [, suffix] } }.
+-- When v-prefixed and bare tags are mixed, only v-prefixed entries are kept.
+-- Non-semver tags are excluded.
+function M.default_normalize(tags)
+  local has_v = false
+  local parsed = {}
+  for _, t in ipairs(tags) do
+    local ver = parse_version(t)
+    if ver then
+      parsed[t] = ver
+      if t:sub(1, 1) == "v" then
+        has_v = true
+      end
+    end
+  end
+  if not has_v then
+    return parsed
+  end
+  local filtered = {}
+  for t, ver in pairs(parsed) do
+    if t:sub(1, 1) == "v" then
+      filtered[t] = ver
+    end
+  end
+  return filtered
 end
 
 return M

@@ -122,6 +122,54 @@ do
   h.is_nil(result, "commit not cooled returns nil")
 end
 
+h.suite("resolver: version suffix tags")
+do
+  local data = {
+    fetched_at = {
+      [HASH_A] = OLD,    -- v1.2.3-alpha
+      [HASH_B] = OLD,    -- v1.2.3
+    },
+    branches = {},
+    tags = {
+      ["v1.2.3-alpha"] = HASH_A,
+      ["v1.2.3"]       = HASH_B,
+    },
+  }
+  local result = resolver.resolve(data, { version = "^1.0.0" }, COOLDOWN_SEC, NOW)
+  h.eq(result, HASH_B, "release preferred over pre-release")
+end
+
+h.suite("resolver: custom normalize")
+do
+  local data = {
+    fetched_at = { [HASH_A] = OLD, [HASH_B] = OLD },
+    branches   = {},
+    tags       = {
+      ["release-1.0.0"] = HASH_A,
+      ["release-2.0.0"] = HASH_B,
+    },
+  }
+  -- Custom normalize strips "release-" prefix before parsing
+  local function my_normalize(tags)
+    local result = {}
+    for _, t in ipairs(tags) do
+      local bare = t:match("^release%-(.+)$")
+      if bare then
+        local semver = require("icebox.semver")
+        if semver.is_semver_tag(bare) then
+          local major, minor, patch = bare:match("^(%d+)%.(%d+)%.(%d+)$")
+          if major then
+            result[t] = { tonumber(major), tonumber(minor), tonumber(patch) }
+          end
+        end
+      end
+    end
+    return result
+  end
+  local result = resolver.resolve(data, { version = ">=1.0.0", normalize = my_normalize }, COOLDOWN_SEC, NOW)
+  h.eq(result, HASH_B, "custom normalize: highest cooled version returned")
+end
+
 h.suite("resolver.fallback")
 do
   h.eq(resolver.fallback({ trusted_commit = HASH_A }), HASH_A, "trusted_commit returned")

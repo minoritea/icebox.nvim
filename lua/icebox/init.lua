@@ -178,7 +178,7 @@ function M.thaw(url, opts)
     local result = resolver.resolve_branch(data, opts.branch, 0, math.huge)
     if result then return result end
   elseif opts.version then
-    local result = resolver.resolve_version(data, opts.version, 0, math.huge)
+    local result = resolver.resolve_version(data, opts.version, 0, math.huge, opts.normalize)
     if result then return result end
   elseif opts.tag then
     local result = resolver.resolve_tag(data, opts.tag, 0, math.huge)

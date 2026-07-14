@@ -206,10 +206,43 @@ version                                            *icebox-thaw-opt-version*
   Semver range. Returns the highest-versioned tag matching the range whose
   cooldown has elapsed. Supported operators: `^`, `~`, `>=`, `>`, `<=`, `<`,
   and exact version strings. A leading `v` on tag names is handled
-  automatically. >lua
+  automatically. Tags with a pre-release suffix such as `1.2.3-alpha` are
+  supported; a release tag ranks higher than the same version with a suffix. >lua
     icebox.thaw(url, { version = "^1.0.0" })
     icebox.thaw(url, { version = ">=2.0.0" })
     icebox.thaw(url, { version = "~1.4.0" })
+<
+normalize                                        *icebox-thaw-opt-normalize*
+  Type: function|nil
+  Custom tag normalization function used when `version` is set. When provided,
+  replaces the default normalization logic (which handles `vX.Y.Z` / `X.Y.Z`
+  mixing and pre-release suffixes).
+
+  The function receives a list of raw tag name strings and must return a map
+  of the form: >lua
+    { [tag_string] = { major, minor, patch [, suffix] }, ... }
+<
+  Non-semver tags should be excluded from the returned map (the map may have
+  fewer entries than the input list, or be empty).
+
+  Example — tags use a `release-X.Y.Z` naming convention: >lua
+    icebox.thaw(url, {
+      version   = ">=1.0.0",
+      normalize = function(tags)
+        local semver = require("icebox.semver")
+        local result = {}
+        for _, t in ipairs(tags) do
+          local bare = t:match("^release%-(.+)$")
+          if bare and semver.is_semver_tag(bare) then
+            local maj, min, pat = bare:match("^(%d+)%.(%d+)%.(%d+)$")
+            if maj then
+              result[t] = { tonumber(maj), tonumber(min), tonumber(pat) }
+            end
+          end
+        end
+        return result
+      end,
+    })
 <
 commit                                              *icebox-thaw-opt-commit*
   Type: string (40-char hex)

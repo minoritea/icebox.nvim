@@ -128,6 +128,12 @@ function M.opts(opts)
     if not ok then return nil, "opts.trusted_commit: " .. err end
   end
 
+  if opts.normalize ~= nil then
+    if type(opts.normalize) ~= "function" then
+      return nil, "opts.normalize: must be a function"
+    end
+  end
+
   return opts
 end
 
