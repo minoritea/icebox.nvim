@@ -100,6 +100,24 @@ Concretely: for `branch = "main", trusted_commit = <HEAD>`, the tip of `main` is
 
 The sentinel value (`"0000000000000000000000000000000000000000"`) returned when no cooled commit is available.
 
+### `icebox.lazy.cooldown(spec)`
+
+Helper for [lazy.nvim](https://github.com/folke/lazy.nvim). Wraps a single plugin spec: if `spec.icebox_options` is set, calls `icebox.thaw()` with the spec's identifier (`spec[1]` / `spec.url` / `file://spec.dir`) and the given options, and assigns the result to `spec.commit`. Specs without `icebox_options` are returned untouched.
+
+The spec is mutated in place and also returned, so it works directly with `vim.tbl_map`:
+
+```lua
+local cooldown = require("icebox.lazy").cooldown
+
+require("lazy").setup(vim.tbl_map(cooldown, {
+  { "nvim-telescope/telescope.nvim", icebox_options = { branch = "master" } },
+  { "folke/tokyonight.nvim",         icebox_options = { version = "^1.0.0" } },
+  { "plain/plugin" },                            -- no icebox_options → passed through
+}))
+```
+
+An existing `spec.commit` is overwritten when `icebox_options` is set; omit `icebox_options` for specs that already pin their own commit.
+
 ## How it works
 
 ```

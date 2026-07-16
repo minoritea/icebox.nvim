@@ -31,6 +31,7 @@ run_spec "tests/semver_spec.lua"    || FAILED=1
 run_spec "tests/store_spec.lua"     || FAILED=1
 run_spec "tests/resolver_spec.lua"  || FAILED=1
 run_spec "tests/git_spec.lua"       || FAILED=1
+run_spec "tests/lazy_spec.lua"      || FAILED=1
 
 rm -rf "$XDG_DIR"
 rm -rf "$FIXTURE_DIR"

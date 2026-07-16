@@ -16,6 +16,7 @@ CONTENTS                                                      *icebox-contents*
      icebox.setup() .................................... |icebox.setup()|
      icebox.thaw() ..................................... |icebox.thaw()|
      icebox.ZERO_HASH .................................. |icebox.ZERO_HASH|
+     icebox.lazy.cooldown() ............................ |icebox.lazy.cooldown()|
   7. Options ............................................ |icebox-options|
   8. thaw() opts ........................................ |icebox-thaw-opts|
   9. Examples ........................................... |icebox-examples|
@@ -159,6 +160,42 @@ produced a usable result: >lua
     -- safe to use hash
   end
 <
+------------------------------------------------------------------------------
+icebox.lazy.cooldown({spec})                          *icebox.lazy.cooldown()*
+
+Helper for lazy.nvim. Given a single plugin spec, when `spec.icebox_options`
+is present it calls |icebox.thaw()| using the spec's identifier and assigns
+the resolved hash to `spec.commit`. Specs without `icebox_options` are
+returned unchanged.
+
+The spec identifier is derived, in order:
+    1. `spec[1]`  (e.g. "owner/repo" or a full URL)
+    2. `spec.url` (e.g. "https://example.com/x.git")
+    3. `spec.dir` prefixed with `file://`
+
+lazy.nvim guarantees at least one of these fields exists on any valid spec.
+
+The spec is mutated in place *and* returned, so the function is usable both
+as an in-place transform and directly with `vim.tbl_map()`.
+
+Parameters:
+  {spec}  (table) lazy.nvim plugin spec.
+
+Return:   (table) The same spec (mutated when `icebox_options` was set).
+
+Example: >lua
+  local cooldown = require("icebox.lazy").cooldown
+
+  require("lazy").setup(vim.tbl_map(cooldown, {
+    { "nvim-telescope/telescope.nvim",
+      icebox_options = { branch = "master" } },
+    { "folke/tokyonight.nvim",
+      icebox_options = { version = "^1.0.0" } },
+    { "plain/plugin" },  -- no icebox_options → passed through
+  }))
+<
+An existing `spec.commit` is overwritten when `icebox_options` is set. Omit
+`icebox_options` for specs that already pin their own commit.
 ==============================================================================
 7. OPTIONS                                                    *icebox-options*
 
