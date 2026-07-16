@@ -63,6 +63,12 @@ if hash == icebox.ZERO_HASH then
 end
 ```
 
+The GitHub shorthand `owner/repo` is also accepted and expanded to `https://github.com/<owner>/<repo>.git` internally (same convention as lazy.nvim / packer.nvim). Use a full URL for non-GitHub hosts or SSH.
+
+```lua
+commit = icebox.thaw("nvim-telescope/telescope.nvim")
+```
+
 **`opts`** — at most one of the following may be specified:
 
 | Key | Type | Description |

@@ -57,8 +57,22 @@ end
 
 -- ─── Resolve logic ───────────────────────────────────────────────────────────
 
+-- Expand a GitHub shorthand ("owner/repo") into a full HTTPS URL. Leaves any
+-- string that already looks like a URL (has a scheme or ssh shorthand) untouched.
+local function expand_github_shorthand(url)
+  if type(url) ~= "string" then return url end
+  if url:find("://", 1, true) then return url end
+  if url:match("^[a-zA-Z0-9_.%-]+@[a-zA-Z0-9_.%-]+:.+") then return url end
+  local owner, repo = url:match("^([a-zA-Z0-9._%-]+)/([a-zA-Z0-9._%-]+)$")
+  if owner and repo then
+    return "https://github.com/" .. owner .. "/" .. repo .. ".git"
+  end
+  return url
+end
+
 function M.thaw(url, opts)
-  -- 1. Validate URL
+  -- 1. Validate URL (GitHub shorthand "owner/repo" is expanded first)
+  url = expand_github_shorthand(url)
   local url_ok, url_err = validate.url(url)
   if not url_ok then
     warn("invalid url: " .. (url_err or ""))

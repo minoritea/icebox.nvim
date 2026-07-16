@@ -130,6 +130,11 @@ state: >lua
 Parameters:
   {url}   (string) Git repository URL. Supported schemes: `https`, `http`,
           `ssh`, `git`, `git+ssh`, `file`, and the `git@host:path` shorthand.
+          The GitHub shorthand `owner/repo` (exactly two path segments, no
+          scheme) is expanded to `https://github.com/<owner>/<repo>.git`
+          before being processed. This matches the default behaviour of
+          lazy.nvim and packer.nvim. Custom hosts / SSH URLs are not covered
+          by the shorthand — pass the full URL in those cases.
 
   {opts}  (table|nil) Optional. See |icebox-thaw-opts|. At most one of
           `branch`, `tag`, `version`, or `commit` may be specified.
@@ -275,6 +280,10 @@ Basic usage: >lua
       commit = icebox.thaw("https://github.com/nvim-telescope/telescope.nvim"),
     },
   }
+<
+GitHub shorthand `owner/repo` is also accepted and expanded to the full
+HTTPS URL internally: >lua
+  commit = icebox.thaw("nvim-telescope/telescope.nvim")
 <
 Track a branch with a trusted fallback: >lua
   commit = icebox.thaw(url, {
