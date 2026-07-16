@@ -188,6 +188,25 @@ trust_on_first_use                            *icebox-opt-trust-on-first-use*
          for that first result only. Subsequent calls go through the normal
          cooldown path.
 
+branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
+  Type:    number (integer >= 1)
+  Default: 500
+
+  Maximum number of branch commits pulled per fetch. Passed to `git log -n`
+  when |icebox.thaw()| performs a branch fetch (both sync and async paths).
+
+  Only the newest N commits (in first-parent order) become candidates for
+  branch resolution. Commits older than this window are simply not returned
+  by that fetch — a later fetch that surfaces them will add them to the
+  store. Existing entries in `fetched_at` are preserved across fetches, so
+  the original observation timestamp of a commit is never overwritten.
+
+  Trade-offs:
+  - Smaller values keep the store JSON compact and speed up resolution on
+    long-lived branches.
+  - Larger values increase the chance that an older `trusted_commit` is
+    still in the candidate set (see |icebox-thaw-opt-trusted-commit|).
+
 ==============================================================================
 8. THAW() OPTS                                              *icebox-thaw-opts*
 

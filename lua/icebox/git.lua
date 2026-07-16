@@ -78,8 +78,20 @@ end
 
 -- ─── Synchronous fetch (trust_on_first_use path) ─────────────────────────────
 
+-- Build a git-log command that caps the number of commits returned.
+local function build_log_cmd(tmpdir, limit)
+  local cmd = { "git", "-C", tmpdir, "log", "--first-parent", "--format=%H" }
+  if limit then
+    vim.list_extend(cmd, { "-n", tostring(limit) })
+  end
+  cmd[#cmd + 1] = "HEAD"
+  return cmd
+end
+
 -- Fetch branch synchronously. Returns new_data table or nil + err.
-function M.fetch_branch_sync(url, branch)
+-- `limit` (optional number): cap on the number of commits included in the
+-- returned branch history (passed to `git log -n`).
+function M.fetch_branch_sync(url, branch, limit)
   local tmpdir = make_tmpdir()
   local clone_args = { "git", "clone", "--bare" }
   vim.list_extend(clone_args, CLONE_SAFETY_ARGS)
@@ -102,9 +114,7 @@ function M.fetch_branch_sync(url, branch)
       or symref_r.stdout:match("refs/heads/(.+)$")
   end
 
-  local log_r = run_sync({
-    "git", "-C", tmpdir, "log", "--first-parent", "--format=%H", "HEAD"
-  })
+  local log_r = run_sync(build_log_cmd(tmpdir, limit))
   rmdir_rf(tmpdir)
 
   if log_r.code ~= 0 then
@@ -187,8 +197,10 @@ local function spawn_async(cmd, callback)
 end
 
 -- Fetch a branch asynchronously.
+-- `limit` (optional number): cap on the number of commits included in the
+-- returned branch history (passed to `git log -n`).
 -- on_done(new_data, err) is called on completion.
-function M.fetch_branch_async(url, branch, on_done)
+function M.fetch_branch_async(url, branch, limit, on_done)
   local tmpdir = make_tmpdir()
   local clone_cmd = { "git", "clone", "--bare" }
   vim.list_extend(clone_cmd, CLONE_SAFETY_ARGS)
@@ -212,10 +224,7 @@ function M.fetch_branch_async(url, branch, on_done)
         or symref_r.stdout:match("refs/heads/(.+)$")
     end
 
-    local log_cmd = {
-      "git", "-C", tmpdir, "log", "--first-parent", "--format=%H", "HEAD"
-    }
-    spawn_async(log_cmd, function(log_code, log_stdout, log_stderr)
+    spawn_async(build_log_cmd(tmpdir, limit), function(log_code, log_stdout, log_stderr)
       rmdir_rf(tmpdir)
       if log_code ~= 0 then
         on_done(nil, "git log failed: " .. log_stderr)

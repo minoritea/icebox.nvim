@@ -77,6 +77,16 @@ do
   h.eq(hashes[1], HASH2,              "newest commit first")
 end
 
+h.suite("git.fetch_branch_sync: limit caps commit count")
+do
+  local data, err = git.fetch_branch_sync(repo_url, "main", 1)
+  h.is_nil(err,                        "no error with limit")
+  local hashes = data.branches["main"]
+  h.eq(#hashes, 1,                     "only 1 commit returned")
+  h.eq(hashes[1], HASH2,               "newest commit kept")
+  h.is_nil(data.fetched_at[HASH1],     "older commit absent from fetched_at")
+end
+
 h.suite("git.fetch_tags_sync: invalid url returns error")
 do
   local data, err = git.fetch_tags_sync("file:///nonexistent/path.git")

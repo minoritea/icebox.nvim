@@ -45,12 +45,13 @@ local function bg_fetch(url, opts, default_branch_unknown)
     store.unlock(url)
   end
 
+  local cfg = config.get()
   if opts.branch then
-    git.fetch_branch_async(url, opts.branch, finish)
+    git.fetch_branch_async(url, opts.branch, cfg.branch_commits_per_fetch, finish)
   elseif opts.tag or opts.version then
     git.fetch_tags_async(url, finish)
   elseif default_branch_unknown then
-    git.fetch_branch_async(url, nil, finish)
+    git.fetch_branch_async(url, nil, cfg.branch_commits_per_fetch, finish)
   end
   -- commit opts: no background fetch
 end
@@ -164,7 +165,7 @@ function M.thaw(url, opts)
   -- Synchronous fetch
   local new_data, fetch_err
   if opts.branch or default_branch_unknown then
-    new_data, fetch_err = git.fetch_branch_sync(url, opts.branch)
+    new_data, fetch_err = git.fetch_branch_sync(url, opts.branch, cfg.branch_commits_per_fetch)
     if new_data and new_data.default_branch and default_branch_unknown then
       opts.branch = new_data.default_branch
     end

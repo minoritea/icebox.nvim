@@ -50,6 +50,7 @@ On the first startup the local store is empty, so `thaw()` returns the zero hash
 |-----|------|---------|-------------|
 | `cooldown_days` | number | `7` | Days a commit must be known before it is returned. `0` disables cooldown. |
 | `trust_on_first_use` | boolean | `false` | When `true`, performs a synchronous fetch on first use and returns a hash immediately, bypassing the cooldown for that first result. |
+| `branch_commits_per_fetch` | number | `500` | Maximum number of branch commits pulled per fetch (`git log -n`). Older commits already recorded in the store keep their original `fetched_at`; a later fetch that reveals commits beyond this window will pick them up over subsequent runs. |
 
 ### `icebox.thaw(url, opts)`
 
