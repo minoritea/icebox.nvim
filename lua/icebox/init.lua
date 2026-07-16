@@ -139,18 +139,14 @@ function M.thaw(url, opts)
       store.write(url, data)
     end
     local result = resolver.resolve(data, opts, cooldown_sec, now)
-    return result or resolver.fallback(opts)
+    return result or ZERO_HASH
   end
 
   -- 6. Main resolve from store
   if store.has_records(data) then
     local result = resolver.resolve(data, opts, cooldown_sec, now)
-    if result then
-      vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
-      return result
-    end
     vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
-    return resolver.fallback(opts)
+    return result or ZERO_HASH
   end
 
   -- 7. fetched_at is empty (first time for this URL)

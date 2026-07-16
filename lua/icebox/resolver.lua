@@ -1,41 +1,82 @@
 local M = {}
 
-local semver   = require("icebox.semver")
-local validate = require("icebox.validate")
+local semver = require("icebox.semver")
 
--- Returns the best cooled-down hash for the given opts, or nil if none found.
+-- Resolution model:
+--   1. Extract the candidate set of commits from the store based on opts
+--      (branch history / version range / single tag / single commit).
+--   2. Find the newest cooled-down commit within that set.
+--   3. If trusted_commit is set AND trusted_commit is in the candidate set,
+--      return whichever of {trusted_commit, newest-cooled} is newer.
+--   4. Otherwise return newest-cooled, or nil if none.
+-- The caller substitutes nil with ZERO_HASH.
+
+-- Returns the best hash for the given opts, or nil if none found.
 -- `data`         : store table (fetched_at, branches, tags)
 -- `opts`         : validated opts table (one of branch/tag/version/commit set)
 -- `cooldown_sec` : number of seconds required since fetched_at
 -- `now`          : current unix timestamp
 function M.resolve(data, opts, cooldown_sec, now)
   if opts.branch then
-    return M.resolve_branch(data, opts.branch, cooldown_sec, now)
+    return M.resolve_branch(data, opts.branch, cooldown_sec, now, opts.trusted_commit)
   elseif opts.tag then
-    return M.resolve_tag(data, opts.tag, cooldown_sec, now)
+    return M.resolve_tag(data, opts.tag, cooldown_sec, now, opts.trusted_commit)
   elseif opts.version then
-    return M.resolve_version(data, opts.version, cooldown_sec, now, opts.normalize)
+    return M.resolve_version(data, opts.version, cooldown_sec, now, opts.normalize, opts.trusted_commit)
   elseif opts.commit then
-    return M.resolve_commit(data, opts.commit, cooldown_sec, now)
+    return M.resolve_commit(data, opts.commit, cooldown_sec, now, opts.trusted_commit)
   end
   return nil
 end
 
-function M.resolve_branch(data, branch, cooldown_sec, now)
+-- Branch: candidate set is data.branches[branch] (newest-first array).
+-- "Newer" == smaller array index.
+function M.resolve_branch(data, branch, cooldown_sec, now, trusted_commit)
   local hashes = data.branches and data.branches[branch]
   if not hashes then return nil end
-  for _, hash in ipairs(hashes) do
+
+  local cooled_idx = nil
+  for i, hash in ipairs(hashes) do
     local fa = data.fetched_at[hash]
     if fa and fa + cooldown_sec <= now then
-      return hash
+      cooled_idx = i
+      break
     end
+  end
+
+  local trusted_idx = nil
+  if trusted_commit then
+    for i, hash in ipairs(hashes) do
+      if hash == trusted_commit then
+        trusted_idx = i
+        break
+      end
+    end
+  end
+
+  if trusted_idx and cooled_idx then
+    if trusted_idx <= cooled_idx then
+      return trusted_commit
+    end
+    return hashes[cooled_idx]
+  elseif trusted_idx then
+    return trusted_commit
+  elseif cooled_idx then
+    return hashes[cooled_idx]
   end
   return nil
 end
 
-function M.resolve_tag(data, tag_name, cooldown_sec, now)
+-- Tag: candidate set is a single hash. If trusted_commit equals it, they
+-- refer to the same commit, so "newer" is trivially either one.
+function M.resolve_tag(data, tag_name, cooldown_sec, now, trusted_commit)
   local hash = data.tags and data.tags[tag_name]
   if not hash then return nil end
+
+  if trusted_commit and trusted_commit == hash then
+    return trusted_commit
+  end
+
   local fa = data.fetched_at[hash]
   if fa and fa + cooldown_sec <= now then
     return hash
@@ -43,8 +84,11 @@ function M.resolve_tag(data, tag_name, cooldown_sec, now)
   return nil
 end
 
-function M.resolve_version(data, range_str, cooldown_sec, now, normalize_fn)
-  local pred, err = semver.parse_range(range_str)
+-- Version range: candidate set is all tags matching the range.
+-- "Newer" == higher semver among matched tags. trusted_commit is only in
+-- the candidate set if some matching tag points at the same hash.
+function M.resolve_version(data, range_str, cooldown_sec, now, normalize_fn, trusted_commit)
+  local pred = semver.parse_range(range_str)
   if not pred then return nil end
 
   normalize_fn = normalize_fn or semver.default_normalize
@@ -58,38 +102,51 @@ function M.resolve_version(data, range_str, cooldown_sec, now, normalize_fn)
 
   local entries = normalize_fn(tag_names)
 
-  local best_ver  = nil
-  local best_hash = nil
+  local best_cooled_tag  = nil
+  local best_cooled_hash = nil
+  local trusted_tag      = nil  -- highest tag in range whose hash == trusted_commit
 
   for tag, version in pairs(entries) do
     local hash = data.tags[tag]
-    if not hash then goto continue end
-    local fa = data.fetched_at[hash]
-    if fa and fa + cooldown_sec <= now then
-      if pred(version) then
-        if best_ver == nil or semver.gt(tag, best_ver) then
-          best_ver  = tag
-          best_hash = hash
+    if hash and pred(version) then
+      if trusted_commit and hash == trusted_commit then
+        if trusted_tag == nil or semver.gt(tag, trusted_tag) then
+          trusted_tag = tag
+        end
+      end
+      local fa = data.fetched_at[hash]
+      if fa and fa + cooldown_sec <= now then
+        if best_cooled_tag == nil or semver.gt(tag, best_cooled_tag) then
+          best_cooled_tag  = tag
+          best_cooled_hash = hash
         end
       end
     end
-    ::continue::
   end
 
-  return best_hash
+  if trusted_tag and best_cooled_tag then
+    if trusted_tag == best_cooled_tag or semver.gt(trusted_tag, best_cooled_tag) then
+      return trusted_commit
+    end
+    return best_cooled_hash
+  elseif trusted_tag then
+    return trusted_commit
+  elseif best_cooled_hash then
+    return best_cooled_hash
+  end
+  return nil
 end
 
-function M.resolve_commit(data, hash, cooldown_sec, now)
+-- Commit: candidate set is a single hash. Same shape as resolve_tag.
+function M.resolve_commit(data, hash, cooldown_sec, now, trusted_commit)
+  if trusted_commit and trusted_commit == hash then
+    return trusted_commit
+  end
   local fa = data.fetched_at[hash]
   if fa and fa + cooldown_sec <= now then
     return hash
   end
   return nil
-end
-
--- Apply fallback: return trusted_commit or zero_hash.
-function M.fallback(opts)
-  return opts.trusted_commit or validate.ZERO_HASH
 end
 
 return M

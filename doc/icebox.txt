@@ -60,19 +60,19 @@ configuration.
 ==============================================================================
 4. CONCEPT                                                    *icebox-concept*
 
-                           resolve request
-                                 │
-                     ┌───────────▼───────────┐
-                     │   local store (JSON)   │
-                     │  fetched_at per hash   │
-                     └───────────┬───────────┘
-                                 │
-                    fetched_at + cooldown_days <= now?
-                           │              │
-                          yes             no
-                           │              │
-                     return hash    return ZERO_HASH
-                                   (+ schedule BG fetch)
+Resolution proceeds in the following steps:
+
+    1. Build a candidate set of commits from the opts:
+       - `branch`  → commits on that branch (newest-first history)
+       - `version` → tags whose semver matches the range
+       - `tag`     → the single commit the tag points at
+       - `commit`  → the specified commit hash
+    2. Pick the newest cooled commit in the set
+       (`fetched_at + cooldown_days <= now`).
+    3. If `trusted_commit` is set AND appears in the candidate set,
+       return whichever of {trusted_commit, newest-cooled} is newer.
+    4. Otherwise return the newest cooled commit, or |icebox.ZERO_HASH|
+       (plus a background fetch) when none is available.
 
 On the first call for a URL the store is empty. If `trust_on_first_use` is
 false (the default), icebox.nvim returns |icebox.ZERO_HASH| and schedules a
@@ -257,12 +257,30 @@ commit                                              *icebox-thaw-opt-commit*
 <
 trusted_commit                              *icebox-thaw-opt-trusted-commit*
   Type: string (40-char hex)
-  Fallback hash returned instead of |icebox.ZERO_HASH| when no cooled commit
-  is available. Useful for providing a known-good baseline on first use
-  without enabling `trust_on_first_use` globally. >lua
+  A hash the caller asserts as safe. Bypasses cooldown *only when it belongs
+  to the candidate set* implied by `branch` / `tag` / `version` / `commit`.
+
+  Resolution:
+    1. Compute the candidate set from the selected option.
+    2. Find the newest cooled-down commit within that set.
+    3. If `trusted_commit` is in the candidate set, return whichever of
+       {trusted_commit, newest-cooled} is newer.
+    4. Otherwise return the newest cooled commit, or |icebox.ZERO_HASH|.
+
+  A `trusted_commit` outside the candidate set (e.g. a hash off the branch,
+  or pointing at a tag outside the version range) is ignored.
+
+  Examples: >lua
+    -- Pin main to its current HEAD immediately, without waiting for cooldown:
+    icebox.thaw(url, {
+      branch         = "main",
+      trusted_commit = "a1b2c3...",  -- must be a commit on `main`
+    })
+
+    -- Adopt the latest v1.x tag immediately if it matches this hash:
     icebox.thaw(url, {
       version        = "^1.0.0",
-      trusted_commit = "a1b2c3...",  -- returned until a cooled tag exists
+      trusted_commit = "d4e5f6...",  -- must equal a tag hash within the range
     })
 <
 ==============================================================================
@@ -285,10 +303,11 @@ GitHub shorthand `owner/repo` is also accepted and expanded to the full
 HTTPS URL internally: >lua
   commit = icebox.thaw("nvim-telescope/telescope.nvim")
 <
-Track a branch with a trusted fallback: >lua
+Track a branch, adopting the given HEAD immediately if it is on that
+branch (see |icebox-thaw-opt-trusted-commit|): >lua
   commit = icebox.thaw(url, {
     branch         = "main",
-    trusted_commit = "d3adb33f...",
+    trusted_commit = "d3adb33f...",  -- must be a commit on `main`
   })
 <
 Pin to a semver range: >lua
