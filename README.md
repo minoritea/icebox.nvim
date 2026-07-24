@@ -81,16 +81,14 @@ To customize a call, pass an options table as the second argument (or as the fir
 | `url` | string | The Git URL, useful with the single-table form `thaw(opts)`. Mutually exclusive with the positional `url` argument and `clone_path`. |
 | `clone_path` | string | Absolute path to an existing clone maintained by another tool (e.g. your plugin manager). The upstream URL is read from that clone's `origin` remote, and its objects are reused for `branch` history in place of icebox's own cache. Mutually exclusive with the positional `url` argument and `opts.url`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 | `branch` | string | Newest-first history of that branch, capped at `branch_commits_per_fetch` commits. |
-| `tag` | string | The single commit the tag points at. |
 | `version` | string | All tags in the store whose semver matches the range (`^1.0.0`, `~1.2.3`, `>=2.0.0`, …). Highest match wins among cooled tags. |
-| `commit` | string | The single specified hash. Fully offline; cooldown starts from first observation. |
 | `trusted_commit` | string | Hash trusted by the user. In the normal path, bypasses the cooldown only when it belongs to the candidate set. See [`doc/icebox.txt`](doc/icebox.txt) for the full resolution rules and empty-store exception. |
 | `cooldown_days` | number | Overrides the `setup()` value for this call. |
 | `trust_on_first_use` | boolean | Overrides the `setup()` value for this call. |
 | `branch_commits_per_fetch` | number | Overrides the `setup()` value for this call. |
 | `normalize` | function | Custom tag-name normalizer used with `version`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 
-When none of `branch`, `tag`, `version`, or `commit` (which are mutually exclusive) is specified, icebox.nvim treats the call as if the latest semver tag were requested when the repository has any semver tags, or as if the default branch were requested otherwise.
+When neither `branch` nor `version` (which are mutually exclusive) is specified, icebox.nvim treats the call as if the latest semver tag were requested when the repository has any semver tags, or as if the default branch were requested otherwise.
 
 ### `icebox.ZERO_HASH`
 

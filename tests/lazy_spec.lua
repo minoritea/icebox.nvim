@@ -39,18 +39,30 @@ end
 h.suite("lazy.cooldown: icebox_options with explicit url")
 do
   reset()
-  local spec = { url = "https://example.com/x.git", icebox_options = { tag = "v1" } }
+  local spec = { url = "https://example.com/x.git", icebox_options = { version = "^1.0.0" } }
   lazy.cooldown(spec)
-  h.eq(calls[1].url, "https://example.com/x.git", "url = spec.url when spec[1] absent")
-  h.eq(calls[1].opts.tag, "v1",                    "opts.tag forwarded")
+  h.eq(calls[1].url, "https://example.com/x.git",  "url = spec.url when spec[1] absent")
+  h.eq(calls[1].opts.version, "^1.0.0",             "opts.version forwarded")
 end
 
-h.suite("lazy.cooldown: icebox_options with dir only")
+h.suite("lazy.cooldown: icebox_options with absolute dir only")
 do
   reset()
   local spec = { dir = "/home/user/local", icebox_options = { branch = "dev" } }
   lazy.cooldown(spec)
-  h.eq(calls[1].url, "file:///home/user/local", "url = file:// + spec.dir")
+  h.eq(calls[1].url, "/home/user/local", "url = spec.dir passed through as-is")
+  h.eq(calls[1].opts.branch, "dev",       "opts.branch forwarded")
+end
+
+h.suite("lazy.cooldown: icebox_options with relative dir → zero hash + WARN")
+do
+  reset()
+  local spec = { dir = "relative/plugin", icebox_options = { branch = "dev" } }
+  local ret = lazy.cooldown(spec)
+  h.eq(ret, spec,                             "returns same spec")
+  h.eq(spec.commit, require("icebox").ZERO_HASH,
+    "commit set to ZERO_HASH for relative spec.dir")
+  h.eq(#calls, 0,                             "thaw not called on rejection")
 end
 
 h.suite("lazy.cooldown: no icebox_options → untouched")
@@ -81,7 +93,7 @@ do
   local specs = {
     { "a/one", icebox_options = { branch = "main" } },
     { "b/two" },
-    { "c/three", icebox_options = { tag = "v1" } },
+    { "c/three", icebox_options = { version = "^1.0.0" } },
   }
   local out = vim.tbl_map(lazy.cooldown, specs)
   h.eq(#out, 3,                        "same count")

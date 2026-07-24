@@ -66,7 +66,7 @@ do
   opts, err = validate.opts({ version = "^1.0.0" })
   h.not_nil(opts, "version opts ok")
 
-  opts, err = validate.opts({ branch = "main", tag = "v1.0.0" })
+  opts, err = validate.opts({ branch = "main", version = "^1.0.0" })
   h.is_nil(opts, "two keys rejected")
 
   opts, err = validate.opts({})

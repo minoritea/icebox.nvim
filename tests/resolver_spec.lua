@@ -45,28 +45,6 @@ do
   h.is_nil(result, "nil when nothing cooled")
 end
 
-h.suite("resolver: tag")
-do
-  local data = {
-    fetched_at = { [HASH_A] = OLD },
-    branches   = {},
-    tags       = { ["v1.0.0"] = HASH_A },
-  }
-  local result = resolver.resolve(data, { tag = "v1.0.0" }, COOLDOWN_SEC, NOW)
-  h.eq(result, HASH_A, "tag cooled returns hash")
-end
-
-h.suite("resolver: tag not cooled")
-do
-  local data = {
-    fetched_at = { [HASH_A] = RECENT },
-    branches   = {},
-    tags       = { ["v1.0.0"] = HASH_A },
-  }
-  local result = resolver.resolve(data, { tag = "v1.0.0" }, COOLDOWN_SEC, NOW)
-  h.is_nil(result, "tag not cooled returns nil")
-end
-
 h.suite("resolver: version range")
 do
   local data = {
@@ -98,28 +76,6 @@ do
   }
   local result = resolver.resolve(data, { version = ">=0.0.0" }, COOLDOWN_SEC, NOW)
   h.eq(result, HASH_A, "v-prefix tags take priority, non-v ignored")
-end
-
-h.suite("resolver: commit cooled")
-do
-  local data = {
-    fetched_at = { [HASH_A] = OLD },
-    branches   = {},
-    tags       = {},
-  }
-  local result = resolver.resolve(data, { commit = HASH_A }, COOLDOWN_SEC, NOW)
-  h.eq(result, HASH_A, "commit cooled returns hash")
-end
-
-h.suite("resolver: commit not cooled")
-do
-  local data = {
-    fetched_at = { [HASH_A] = RECENT },
-    branches   = {},
-    tags       = {},
-  }
-  local result = resolver.resolve(data, { commit = HASH_A }, COOLDOWN_SEC, NOW)
-  h.is_nil(result, "commit not cooled returns nil")
 end
 
 h.suite("resolver: version suffix tags")
@@ -290,28 +246,6 @@ do
   h.eq(result, HASH_A, "trusted_commit returned when in candidate set and nothing cooled")
 end
 
-h.suite("resolver: tag + trusted_commit matches tag hash")
-do
-  local data = {
-    fetched_at = { [HASH_A] = RECENT },
-    branches   = {},
-    tags       = { ["v1.0.0"] = HASH_A },
-  }
-  local result = resolver.resolve(data, { tag = "v1.0.0", trusted_commit = HASH_A }, COOLDOWN_SEC, NOW)
-  h.eq(result, HASH_A, "trusted_commit returned even without cooldown when tag matches")
-end
-
-h.suite("resolver: tag + trusted_commit mismatch, not cooled")
-do
-  local data = {
-    fetched_at = { [HASH_A] = RECENT },
-    branches   = {},
-    tags       = { ["v1.0.0"] = HASH_A },
-  }
-  local result = resolver.resolve(data, { tag = "v1.0.0", trusted_commit = HASH_B }, COOLDOWN_SEC, NOW)
-  h.is_nil(result, "nil when trusted_commit off-tag and tag not cooled")
-end
-
 h.suite("resolver: version + trusted_commit newer than newest cooled")
 do
   -- v1.3.0 (HASH_C) is not cooled; v1.2.0 (HASH_B) is cooled.
@@ -360,17 +294,6 @@ do
   }
   local result = resolver.resolve(data, { version = "^1.0.0", trusted_commit = HASH_C }, COOLDOWN_SEC, NOW)
   h.eq(result, HASH_B, "trusted_commit outside range is ignored")
-end
-
-h.suite("resolver: commit + trusted_commit equals target, not cooled")
-do
-  local data = {
-    fetched_at = { [HASH_A] = RECENT },
-    branches   = {},
-    tags       = {},
-  }
-  local result = resolver.resolve(data, { commit = HASH_A, trusted_commit = HASH_A }, COOLDOWN_SEC, NOW)
-  h.eq(result, HASH_A, "trusted_commit==commit returns it even when not cooled")
 end
 
 h.summary()

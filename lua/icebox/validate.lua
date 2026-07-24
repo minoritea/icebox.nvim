@@ -113,7 +113,9 @@ function M.clone_path(path)
   if path:find("\0") or path:find("\n") or path:find("\t") or path:find("\r") then
     return nil, "clone_path contains invalid characters"
   end
-  local expanded = vim.fn.expand(path)
+  -- vim.fs.normalize handles ~ expansion, backslash → forward-slash on
+  -- Windows, and .. resolution in one pass.
+  local expanded = vim.fs.normalize(path)
   if type(expanded) ~= "string" or expanded == "" then
     return nil, "clone_path could not be expanded"
   end
@@ -143,7 +145,7 @@ function M.opts(opts)
     return nil, "opts must be a table"
   end
 
-  local keys = { "branch", "tag", "version", "commit" }
+  local keys = { "branch", "version" }
   local found = {}
   for _, k in ipairs(keys) do
     if opts[k] ~= nil then
@@ -152,7 +154,7 @@ function M.opts(opts)
   end
 
   if #found > 1 then
-    return nil, "opts: only one of branch/tag/version/commit may be specified, got: " .. table.concat(found, ", ")
+    return nil, "opts: only one of branch/version may be specified, got: " .. table.concat(found, ", ")
   end
 
   local kind = found[1]  -- may be nil (default resolution handled by caller)
@@ -160,15 +162,9 @@ function M.opts(opts)
   if kind == "branch" then
     local ok, err = M.branch(opts.branch)
     if not ok then return nil, "opts.branch: " .. err end
-  elseif kind == "tag" then
-    local ok, err = M.tag(opts.tag)
-    if not ok then return nil, "opts.tag: " .. err end
   elseif kind == "version" then
     local _, range_err = semver.parse_range(opts.version)
     if range_err then return nil, "opts.version: " .. range_err end
-  elseif kind == "commit" then
-    local ok, err = M.commit_hash(opts.commit)
-    if not ok then return nil, "opts.commit: " .. err end
   end
 
   if opts.trusted_commit ~= nil then

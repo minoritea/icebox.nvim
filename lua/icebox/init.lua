@@ -63,8 +63,8 @@ local function bg_fetch(url, opts, cfg, default_branch_unknown)
     if opts.branch then
       git.fetch_branch_async(url, opts.branch, cfg.branch_commits_per_fetch,
         fetch_opts_for(url, opts), finish)
-    elseif opts.tag or opts.version then
-      -- tag / version paths ignore clone_path — ls-remote is authoritative.
+    elseif opts.version then
+      -- version path ignores clone_path — ls-remote is authoritative.
       git.fetch_tags_async(url, finish)
     elseif default_branch_unknown then
       git.fetch_branch_async(url, nil, cfg.branch_commits_per_fetch,
@@ -74,7 +74,7 @@ local function bg_fetch(url, opts, cfg, default_branch_unknown)
 end
 
 -- Schedule a background ls-remote to seed default_branch + tags for a URL
--- whose store is empty and no branch/tag/version/commit was requested.
+-- whose store is empty and no branch/version was requested.
 -- Used only by the empty-store-default path; bg_fetch handles all other cases.
 local function schedule_symref_probe(url)
   vim.schedule(function()
@@ -193,8 +193,18 @@ function M.thaw(url_or_opts, opts)
   -- 5. Load store (shared across all subsequent steps)
   local data = store.read(url)
 
-  -- 6. Resolve default opts if none of branch/tag/version/commit specified
-  local resolved_kind = opts.branch or opts.tag or opts.version or opts.commit
+  -- 6. Resolve default opts if none of branch/version specified.
+  --
+  -- Conceptually there are two fallback routes:
+  --   (a) if the store has semver tags → behave as `version = ">=0.0.0"`
+  --   (b) otherwise                    → behave as `branch = <default_branch>`
+  -- The remaining branches below are NOT part of the conceptual fallback:
+  -- they handle the error/bootstrap case where the store has no information
+  -- at all (no tags AND no cached default_branch), i.e. we cannot pick
+  -- either (a) or (b). In that case we either schedule a background probe
+  -- and return ZERO_HASH (TOFU=false) or kick off a synchronous fetch that
+  -- discovers default_branch by cloning HEAD (TOFU=true).
+  local resolved_kind = opts.branch or opts.version
   -- default_branch_unknown: branch not specified and not yet cached in store.
   local default_branch_unknown = false
   if not resolved_kind then
@@ -203,35 +213,25 @@ function M.thaw(url_or_opts, opts)
     elseif data.default_branch then
       opts = vim.tbl_extend("keep", opts, { branch = data.default_branch })
     elseif not cfg.trust_on_first_use then
-      -- Empty store, no branch/tag/version/commit, no default_branch cached:
+      -- Bootstrap: empty store, no branch/version, no default_branch.
       -- kick off a BG probe to seed default_branch + tags, and return zero.
       schedule_symref_probe(url)
       return ZERO_HASH
     else
-      -- trust_on_first_use=true: sync fetch with branch=nil clones default branch
+      -- Bootstrap under trust_on_first_use=true: sync fetch with branch=nil
+      -- clones the default branch and discovers its name in the process.
       default_branch_unknown = true
     end
   end
 
-  -- 7. commit: special synchronous handling
-  if opts.commit then
-    local hash = opts.commit
-    if not data.fetched_at[hash] then
-      data.fetched_at[hash] = now
-      store.write(url, data)
-    end
-    local result = resolver.resolve(data, opts, cooldown_sec, now)
-    return result or ZERO_HASH
-  end
-
-  -- 8. Main resolve from store
+  -- 7. Main resolve from store
   if store.has_records(data) then
     local result = resolver.resolve(data, opts, cooldown_sec, now)
     vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
     return result or ZERO_HASH
   end
 
-  -- 9. fetched_at is empty (first time for this URL)
+  -- 8. fetched_at is empty (first time for this URL)
   if not cfg.trust_on_first_use then
     vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
     return ZERO_HASH
@@ -252,7 +252,7 @@ function M.thaw(url_or_opts, opts)
       opts.branch = new_data.default_branch
     end
   else
-    -- tag or version (clone_path is ignored — ls-remote is authoritative)
+    -- version (clone_path is ignored — ls-remote is authoritative)
     new_data, fetch_err = git.fetch_tags_sync(url)
   end
 
@@ -272,9 +272,6 @@ function M.thaw(url_or_opts, opts)
     if result then return result end
   elseif opts.version then
     local result = resolver.resolve_version(data, opts.version, 0, math.huge, opts.normalize)
-    if result then return result end
-  elseif opts.tag then
-    local result = resolver.resolve_tag(data, opts.tag, 0, math.huge)
     if result then return result end
   end
 

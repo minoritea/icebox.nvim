@@ -4,7 +4,7 @@ local semver = require("icebox.semver")
 
 -- Resolution model:
 --   1. Extract the candidate set of commits from the store based on opts
---      (branch history / version range / single tag / single commit).
+--      (branch history / version range).
 --   2. Find the newest cooled-down commit within that set.
 --   3. If trusted_commit is set AND trusted_commit is in the candidate set,
 --      return whichever of {trusted_commit, newest-cooled} is newer.
@@ -13,18 +13,14 @@ local semver = require("icebox.semver")
 
 -- Returns the best hash for the given opts, or nil if none found.
 -- `data`         : store table (fetched_at, branches, tags)
--- `opts`         : validated opts table (one of branch/tag/version/commit set)
+-- `opts`         : validated opts table (one of branch/version set)
 -- `cooldown_sec` : number of seconds required since fetched_at
 -- `now`          : current unix timestamp
 function M.resolve(data, opts, cooldown_sec, now)
   if opts.branch then
     return M.resolve_branch(data, opts.branch, cooldown_sec, now, opts.trusted_commit)
-  elseif opts.tag then
-    return M.resolve_tag(data, opts.tag, cooldown_sec, now, opts.trusted_commit)
   elseif opts.version then
     return M.resolve_version(data, opts.version, cooldown_sec, now, opts.normalize, opts.trusted_commit)
-  elseif opts.commit then
-    return M.resolve_commit(data, opts.commit, cooldown_sec, now, opts.trusted_commit)
   end
   return nil
 end
@@ -63,23 +59,6 @@ function M.resolve_branch(data, branch, cooldown_sec, now, trusted_commit)
     return trusted_commit
   elseif cooled_idx then
     return hashes[cooled_idx]
-  end
-  return nil
-end
-
--- Tag: candidate set is a single hash. If trusted_commit equals it, they
--- refer to the same commit, so "newer" is trivially either one.
-function M.resolve_tag(data, tag_name, cooldown_sec, now, trusted_commit)
-  local hash = data.tags and data.tags[tag_name]
-  if not hash then return nil end
-
-  if trusted_commit and trusted_commit == hash then
-    return trusted_commit
-  end
-
-  local fa = data.fetched_at[hash]
-  if fa and fa + cooldown_sec <= now then
-    return hash
   end
   return nil
 end
@@ -136,18 +115,6 @@ function M.resolve_version(data, range_str, cooldown_sec, now, normalize_fn, tru
     return trusted_commit
   elseif best_cooled_hash then
     return best_cooled_hash
-  end
-  return nil
-end
-
--- Commit: candidate set is a single hash. Same shape as resolve_tag.
-function M.resolve_commit(data, hash, cooldown_sec, now, trusted_commit)
-  if trusted_commit and trusted_commit == hash then
-    return trusted_commit
-  end
-  local fa = data.fetched_at[hash]
-  if fa and fa + cooldown_sec <= now then
-    return hash
   end
   return nil
 end

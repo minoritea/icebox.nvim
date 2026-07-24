@@ -3,38 +3,51 @@ local M = {}
 local validate = require("icebox.validate")
 local semver   = require("icebox.semver")
 
+-- True on Windows (XDG env vars are rarely set there; use stdpath instead).
+local function is_windows()
+  return vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
+end
+
 -- Returns the directory where store files live.
 local function store_dir()
   local xdg = vim.env.XDG_DATA_HOME
   if not xdg or xdg == "" then
-    xdg = vim.fn.expand("~/.local/share")
+    if is_windows() then
+      xdg = vim.fn.stdpath("data")
+    else
+      xdg = vim.fn.expand("~/.local/share")
+    end
   end
-  return xdg .. "/icebox.nvim"
+  return vim.fs.joinpath(xdg, "icebox.nvim")
 end
 
 -- Returns path to the JSON file for a given URL.
 function M.path_for(url)
   local sha = vim.fn.sha256(url)
-  return store_dir() .. "/" .. sha .. ".json"
+  return vim.fs.joinpath(store_dir(), sha .. ".json")
 end
 
 -- Returns path to the lock file for a given URL.
 function M.lock_path_for(url)
-  return store_dir() .. "/locks/" .. vim.fn.sha256(url) .. ".lock"
+  return vim.fs.joinpath(store_dir(), "locks", vim.fn.sha256(url) .. ".lock")
 end
 
 -- Returns the directory where persistent bare-clone caches live.
 local function cache_root()
   local xdg = vim.env.XDG_CACHE_HOME
   if not xdg or xdg == "" then
-    xdg = vim.fn.expand("~/.cache")
+    if is_windows() then
+      xdg = vim.fn.stdpath("cache")
+    else
+      xdg = vim.fn.expand("~/.cache")
+    end
   end
-  return xdg .. "/icebox.nvim/clones"
+  return vim.fs.joinpath(xdg, "icebox.nvim", "clones")
 end
 
 -- Returns the cache directory for a given URL.
 function M.cache_dir_for(url)
-  return cache_root() .. "/" .. vim.fn.sha256(url)
+  return vim.fs.joinpath(cache_root(), vim.fn.sha256(url))
 end
 
 -- Ensure a directory exists (synchronous).
