@@ -107,6 +107,13 @@ function M.gt(tag_a, tag_b)
   return cmp(a, b) > 0
 end
 
+-- Compare two normalized version tuples { major, minor, patch [, suffix] }.
+-- Returns -1, 0, or 1. Exposed for callers that already have parsed values
+-- (custom normalizers) so they don't have to round-trip through tag names.
+function M.cmp_versions(a, b)
+  return cmp(a, b)
+end
+
 -- Returns true if tag_name is a semver tag (with or without leading "v").
 function M.is_semver_tag(tag_name)
   return parse_version(tag_name) ~= nil

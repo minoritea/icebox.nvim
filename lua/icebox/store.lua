@@ -23,6 +23,20 @@ function M.lock_path_for(url)
   return store_dir() .. "/locks/" .. vim.fn.sha256(url) .. ".lock"
 end
 
+-- Returns the directory where persistent bare-clone caches live.
+local function cache_root()
+  local xdg = vim.env.XDG_CACHE_HOME
+  if not xdg or xdg == "" then
+    xdg = vim.fn.expand("~/.cache")
+  end
+  return xdg .. "/icebox.nvim/clones"
+end
+
+-- Returns the cache directory for a given URL.
+function M.cache_dir_for(url)
+  return cache_root() .. "/" .. vim.fn.sha256(url)
+end
+
 -- Ensure a directory exists (synchronous).
 local function mkdir_p(dir)
   vim.fn.mkdir(dir, "p")

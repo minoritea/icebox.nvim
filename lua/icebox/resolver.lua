@@ -102,34 +102,37 @@ function M.resolve_version(data, range_str, cooldown_sec, now, normalize_fn, tru
 
   local entries = normalize_fn(tag_names)
 
-  local best_cooled_tag  = nil
+  -- Compare using the version tuple produced by the normalizer, not the tag
+  -- string. Custom normalizers may map non-standard tag names (e.g.
+  -- "release-1.2.3") that semver.gt can't parse.
   local best_cooled_hash = nil
-  local trusted_tag      = nil  -- highest tag in range whose hash == trusted_commit
+  local best_cooled_ver  = nil
+  local trusted_ver      = nil  -- highest version in range whose hash == trusted_commit
 
   for tag, version in pairs(entries) do
     local hash = data.tags[tag]
     if hash and pred(version) then
       if trusted_commit and hash == trusted_commit then
-        if trusted_tag == nil or semver.gt(tag, trusted_tag) then
-          trusted_tag = tag
+        if trusted_ver == nil or semver.cmp_versions(version, trusted_ver) > 0 then
+          trusted_ver = version
         end
       end
       local fa = data.fetched_at[hash]
       if fa and fa + cooldown_sec <= now then
-        if best_cooled_tag == nil or semver.gt(tag, best_cooled_tag) then
-          best_cooled_tag  = tag
+        if best_cooled_ver == nil or semver.cmp_versions(version, best_cooled_ver) > 0 then
+          best_cooled_ver  = version
           best_cooled_hash = hash
         end
       end
     end
   end
 
-  if trusted_tag and best_cooled_tag then
-    if trusted_tag == best_cooled_tag or semver.gt(trusted_tag, best_cooled_tag) then
+  if trusted_ver and best_cooled_ver then
+    if semver.cmp_versions(trusted_ver, best_cooled_ver) >= 0 then
       return trusted_commit
     end
     return best_cooled_hash
-  elseif trusted_tag then
+  elseif trusted_ver then
     return trusted_commit
   elseif best_cooled_hash then
     return best_cooled_hash

@@ -41,9 +41,15 @@ do
   h.is_true(fa2 >= before and fa2 <= after, "fetched_at for HASH2 in range")
 end
 
+-- fetch_branch_sync now requires opts.cache_dir (or opts.clone_path); use a
+-- fresh tempdir per suite so we exercise the cold-clone path each time.
+local function fresh_cache_opts()
+  return { cache_dir = vim.fn.tempname() .. "-cache" }
+end
+
 h.suite("git.fetch_branch_sync: commit order and default_branch")
 do
-  local data, err = git.fetch_branch_sync(repo_url, "main")
+  local data, err = git.fetch_branch_sync(repo_url, "main", nil, fresh_cache_opts())
   h.is_nil(err,                        "no error")
   h.not_nil(data,                      "data returned")
   h.eq(data.default_branch, "main",    "default_branch = main")
@@ -56,7 +62,7 @@ end
 h.suite("git.fetch_branch_sync: fetched_at populated")
 do
   local before = os.time()
-  local data, _ = git.fetch_branch_sync(repo_url, "main")
+  local data, _ = git.fetch_branch_sync(repo_url, "main", nil, fresh_cache_opts())
   local after  = os.time()
   local fa1 = data.fetched_at[HASH1]
   local fa2 = data.fetched_at[HASH2]
@@ -67,7 +73,7 @@ end
 
 h.suite("git.fetch_branch_sync: nil branch uses default")
 do
-  local data, err = git.fetch_branch_sync(repo_url, nil)
+  local data, err = git.fetch_branch_sync(repo_url, nil, nil, fresh_cache_opts())
   h.is_nil(err,                        "no error with nil branch")
   h.not_nil(data,                      "data returned")
   h.eq(data.default_branch, "main",    "default_branch resolved")
@@ -79,7 +85,7 @@ end
 
 h.suite("git.fetch_branch_sync: limit caps commit count")
 do
-  local data, err = git.fetch_branch_sync(repo_url, "main", 1)
+  local data, err = git.fetch_branch_sync(repo_url, "main", 1, fresh_cache_opts())
   h.is_nil(err,                        "no error with limit")
   local hashes = data.branches["main"]
   h.eq(#hashes, 1,                     "only 1 commit returned")

@@ -14,23 +14,35 @@ local function warn(msg)
   vim.notify("[icebox] " .. msg, vim.log.levels.WARN)
 end
 
---- Configure icebox.nvim. Call once during startup (e.g. in lazy.nvim's config).
---- Defaults apply if setup() is never called:
----   cooldown_days      = 7      (0 disables cooldown)
----   trust_on_first_use = false
---- setup() may be called multiple times; later calls override earlier ones.
+--- Configure icebox.nvim. Optional — if setup() is never called, thaw() uses
+--- the built-in defaults (cooldown_days=7, trust_on_first_use=false,
+--- branch_commits_per_fetch=500). Per-call overrides on thaw() opts take
+--- precedence over both setup values and defaults.
 function M.setup(opts)
   config.set(opts or {})
 end
 
+-- Build the fetch-opts table for git.fetch_branch_* calls. Always populates
+-- exactly one of clone_path (when the caller supplied it) or cache_dir
+-- (the icebox-owned bare clone for this URL).
+local function fetch_opts_for(url, opts)
+  if opts.clone_path then
+    return { clone_path = opts.clone_path }
+  end
+  return { cache_dir = store.cache_dir_for(url) }
+end
+
 -- ─── Background fetch ────────────────────────────────────────────────────────
 
-local function bg_fetch(url, opts, default_branch_unknown)
+-- Acquire the URL's cross-process lock, invoke `fetch_fn(finish)` where
+-- `finish(new_data, err)` merges the fetch result into the store and
+-- releases the lock. If the lock is already held by a live process the
+-- fetch is skipped entirely.
+local function with_store_lock(url, fetch_fn)
   if not store.lock(url) then
     return  -- another process holds the lock for this URL
   end
-
-  local function finish(new_data, err)
+  fetch_fn(function(new_data, err)
     if err then
       warn("fetch failed for " .. url .. ": " .. err)
       store.unlock(url)
@@ -43,27 +55,42 @@ local function bg_fetch(url, opts, default_branch_unknown)
       warn("store write failed: " .. (write_err or ""))
     end
     store.unlock(url)
-  end
+  end)
+end
 
-  local cfg = config.get()
-  if opts.branch then
-    git.fetch_branch_async(url, opts.branch, cfg.branch_commits_per_fetch, finish)
-  elseif opts.tag or opts.version then
-    git.fetch_tags_async(url, finish)
-  elseif default_branch_unknown then
-    git.fetch_branch_async(url, nil, cfg.branch_commits_per_fetch, finish)
-  end
-  -- commit opts: no background fetch
+local function bg_fetch(url, opts, cfg, default_branch_unknown)
+  with_store_lock(url, function(finish)
+    if opts.branch then
+      git.fetch_branch_async(url, opts.branch, cfg.branch_commits_per_fetch,
+        fetch_opts_for(url, opts), finish)
+    elseif opts.tag or opts.version then
+      -- tag / version paths ignore clone_path — ls-remote is authoritative.
+      git.fetch_tags_async(url, finish)
+    elseif default_branch_unknown then
+      git.fetch_branch_async(url, nil, cfg.branch_commits_per_fetch,
+        fetch_opts_for(url, opts), finish)
+    end
+  end)
+end
+
+-- Schedule a background ls-remote to seed default_branch + tags for a URL
+-- whose store is empty and no branch/tag/version/commit was requested.
+-- Used only by the empty-store-default path; bg_fetch handles all other cases.
+local function schedule_symref_probe(url)
+  vim.schedule(function()
+    with_store_lock(url, function(finish)
+      git.fetch_tags_async(url, finish)
+    end)
+  end)
 end
 
 -- ─── Resolve logic ───────────────────────────────────────────────────────────
 
--- Expand a GitHub shorthand ("owner/repo") into a full HTTPS URL. Leaves any
--- string that already looks like a URL (has a scheme or ssh shorthand) untouched.
-local function expand_github_shorthand(url)
-  if type(url) ~= "string" then return url end
-  if url:find("://", 1, true) then return url end
-  if url:match("^[a-zA-Z0-9_.%-]+@[a-zA-Z0-9_.%-]+:.+") then return url end
+-- Expand a GitHub shorthand ("owner/repo") to a full HTTPS URL. All other
+-- strings pass through unchanged; downstream validate.url decides what to
+-- reject (relative paths, unknown schemes, tilde-prefixed paths, etc.).
+-- Callers must pass a string; the guard is enforced upstream.
+local function normalize_url(url)
   local owner, repo = url:match("^([a-zA-Z0-9._%-]+)/([a-zA-Z0-9._%-]+)$")
   if owner and repo then
     return "https://github.com/" .. owner .. "/" .. repo .. ".git"
@@ -71,16 +98,43 @@ local function expand_github_shorthand(url)
   return url
 end
 
-function M.thaw(url, opts)
-  -- 1. Validate URL (GitHub shorthand "owner/repo" is expanded first)
-  url = expand_github_shorthand(url)
-  local url_ok, url_err = validate.url(url)
-  if not url_ok then
-    warn("invalid url: " .. (url_err or ""))
+-- Signatures (exactly these three are accepted; any other shape is a parse
+-- error surfaced as WARN + ZERO_HASH):
+--   thaw(url_string)                → URL is url_string
+--   thaw(url_string, opts_table)    → URL is url_string; opts_table must not carry url/clone_path
+--   thaw(opts_table)                → URL comes from opts_table.url or opts_table.clone_path
+--
+-- opts.clone_path (when set) is the path to an EXISTING external clone
+-- (typically maintained by a plugin manager) — NOT an icebox-owned cache.
+-- The path must exist and be a git repository; icebox does not create it.
+-- Its `origin` remote supplies the URL used for the store key and fetches.
+--
+-- The three URL sources — the `url` positional argument, `opts.url`, and
+-- `opts.clone_path` (via its origin remote) — are MUTUALLY EXCLUSIVE.
+-- Specifying more than one is a parse error (WARN + ZERO_HASH). Specifying
+-- none is also an error.
+function M.thaw(url_or_opts, opts)
+  -- Canonicalize the call shape. Exactly three are accepted:
+  --   thaw(url)        : url_or_opts is a string, opts is nil
+  --   thaw(url, opts)  : url_or_opts is a string, opts is a table
+  --   thaw(opts)       : url_or_opts is a table,  opts is nil
+  -- Anything else (nil first arg, table+table, string+non-table, etc.)
+  -- is a parse error surfaced as WARN + ZERO_HASH.
+  local url = nil
+  local t1, t2 = type(url_or_opts), type(opts)
+  if t1 == "string" and t2 == "nil" then
+    url = url_or_opts
+  elseif t1 == "string" and t2 == "table" then
+    url = url_or_opts
+  elseif t1 == "table" and t2 == "nil" then
+    opts = url_or_opts
+  else
+    warn("invalid thaw() call: expected thaw(url), thaw(url, opts), or thaw(opts); got ("
+         .. t1 .. ", " .. t2 .. ")")
     return ZERO_HASH
   end
 
-  -- 2. Parse opts (version range validated inside validate.opts)
+  -- 1. Parse opts first (may contain url / clone_path)
   local parsed_opts, opts_err = validate.opts(opts)
   if not parsed_opts then
     warn(opts_err or "invalid opts")
@@ -88,51 +142,78 @@ function M.thaw(url, opts)
   end
   opts = parsed_opts
 
-  local cfg          = config.get()
+  -- 2. Resolve URL. The three sources (url arg, opts.url, opts.clone_path)
+  --    are mutually exclusive. Multiple → parse error. None → parse error.
+  local sources = {}
+  if type(url) == "string" then sources[#sources + 1] = "url argument" end
+  if type(opts.url) == "string" then sources[#sources + 1] = "opts.url" end
+  if opts.clone_path then sources[#sources + 1] = "opts.clone_path" end
+
+  if #sources > 1 then
+    warn("only one of url argument / opts.url / opts.clone_path may be specified, got: "
+         .. table.concat(sources, ", "))
+    return ZERO_HASH
+  end
+  if #sources == 0 then
+    warn("no URL provided: pass a URL string, opts.url, or opts.clone_path")
+    return ZERO_HASH
+  end
+
+  local resolved_url
+  if opts.clone_path then
+    local origin, origin_err = git.origin_url(opts.clone_path)
+    if not origin then
+      warn("clone_path: " .. (origin_err or ""))
+      return ZERO_HASH
+    end
+    resolved_url = normalize_url(origin)
+  elseif type(url) == "string" then
+    resolved_url = normalize_url(url)
+  else
+    resolved_url = normalize_url(opts.url)
+  end
+
+  -- 3. Validate the resolved URL
+  local url_ok, url_err = validate.url(resolved_url)
+  if not url_ok then
+    warn("invalid url: " .. (url_err or ""))
+    return ZERO_HASH
+  end
+  url = resolved_url
+
+  -- 4. Resolve effective cfg (per-call overrides win over setup values)
+  local cfg = config.merge_overrides({
+    cooldown_days            = opts.cooldown_days,
+    trust_on_first_use       = opts.trust_on_first_use,
+    branch_commits_per_fetch = opts.branch_commits_per_fetch,
+  })
   local cooldown_sec = cfg.cooldown_days * 86400
   local now          = os.time()
 
-  -- 3. Load store (shared across all subsequent steps)
+  -- 5. Load store (shared across all subsequent steps)
   local data = store.read(url)
 
-  -- 4. Resolve default opts if none of branch/tag/version/commit specified
+  -- 6. Resolve default opts if none of branch/tag/version/commit specified
   local resolved_kind = opts.branch or opts.tag or opts.version or opts.commit
   -- default_branch_unknown: branch not specified and not yet cached in store.
-  -- Kept as a local so it never leaks into the opts table.
   local default_branch_unknown = false
   if not resolved_kind then
     if store.has_semver_tags(data) then
       opts = vim.tbl_extend("keep", opts, { version = ">=0.0.0" })
+    elseif data.default_branch then
+      opts = vim.tbl_extend("keep", opts, { branch = data.default_branch })
+    elseif not cfg.trust_on_first_use then
+      -- Empty store, no branch/tag/version/commit, no default_branch cached:
+      -- kick off a BG probe to seed default_branch + tags, and return zero.
+      schedule_symref_probe(url)
+      return ZERO_HASH
     else
-      if data.default_branch then
-        opts = vim.tbl_extend("keep", opts, { branch = data.default_branch })
-      else
-        if not cfg.trust_on_first_use then
-          -- Launch BG fetch which will populate default_branch + tags
-          vim.schedule(function()
-            if not store.lock(url) then return end
-            git.fetch_tags_async(url, function(new_data, err)
-              if err then
-                warn("fetch failed for " .. url .. ": " .. err)
-                store.unlock(url)
-                return
-              end
-              local d = store.read(url)
-              store.merge(d, new_data)
-              local ok, werr = store.write(url, d)
-              if not ok then warn("store write failed: " .. (werr or "")) end
-              store.unlock(url)
-            end)
-          end)
-          return ZERO_HASH
-        end
-        -- trust_on_first_use=true: sync fetch with branch=nil clones default branch
-        default_branch_unknown = true
-      end
+      -- trust_on_first_use=true: sync fetch with branch=nil clones default branch
+      default_branch_unknown = true
     end
   end
 
-  -- 5. commit: special synchronous handling
+  -- 7. commit: special synchronous handling
   if opts.commit then
     local hash = opts.commit
     if not data.fetched_at[hash] then
@@ -143,34 +224,35 @@ function M.thaw(url, opts)
     return result or ZERO_HASH
   end
 
-  -- 6. Main resolve from store
+  -- 8. Main resolve from store
   if store.has_records(data) then
     local result = resolver.resolve(data, opts, cooldown_sec, now)
-    vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
+    vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
     return result or ZERO_HASH
   end
 
-  -- 7. fetched_at is empty (first time for this URL)
+  -- 9. fetched_at is empty (first time for this URL)
   if not cfg.trust_on_first_use then
-    vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
+    vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
     return ZERO_HASH
   end
 
   -- trust_on_first_use=true
   if opts.trusted_commit then
-    vim.schedule(function() bg_fetch(url, opts, default_branch_unknown) end)
+    vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
     return opts.trusted_commit
   end
 
   -- Synchronous fetch
   local new_data, fetch_err
   if opts.branch or default_branch_unknown then
-    new_data, fetch_err = git.fetch_branch_sync(url, opts.branch, cfg.branch_commits_per_fetch)
+    new_data, fetch_err = git.fetch_branch_sync(url, opts.branch,
+      cfg.branch_commits_per_fetch, fetch_opts_for(url, opts))
     if new_data and new_data.default_branch and default_branch_unknown then
       opts.branch = new_data.default_branch
     end
   else
-    -- tag or version
+    -- tag or version (clone_path is ignored — ls-remote is authoritative)
     new_data, fetch_err = git.fetch_tags_sync(url)
   end
 

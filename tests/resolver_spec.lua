@@ -170,6 +170,65 @@ do
   h.eq(result, HASH_B, "custom normalize: highest cooled version returned")
 end
 
+-- The two suites below exercise the interaction between a custom normalizer
+-- and trusted_commit through resolve_version. This path uses cmp_versions
+-- on the tuple returned by the normalizer, not semver.gt on the raw tag
+-- string — a regression here would silently break custom-tag schemes like
+-- "release-X.Y.Z" (where semver.gt cannot parse the tag name).
+local function release_normalize(tags)
+  local out = {}
+  for _, t in ipairs(tags) do
+    local bare = t:match("^release%-(.+)$")
+    if bare then
+      local maj, min, pat = bare:match("^(%d+)%.(%d+)%.(%d+)$")
+      if maj then
+        out[t] = { tonumber(maj), tonumber(min), tonumber(pat) }
+      end
+    end
+  end
+  return out
+end
+
+h.suite("resolver: custom normalize + trusted_commit at highest tag")
+do
+  local data = {
+    fetched_at = { [HASH_A] = OLD, [HASH_B] = OLD },
+    branches   = {},
+    tags       = {
+      ["release-1.0.0"] = HASH_A,  -- lower, cooled
+      ["release-2.0.0"] = HASH_B,  -- higher, cooled
+    },
+  }
+  -- trusted_commit = HASH_B corresponds to release-2.0.0 (the highest
+  -- cooled tag in range). trusted_commit is not older than newest-cooled,
+  -- so cmp_versions returns >= 0 → trusted_commit wins.
+  local result = resolver.resolve(data,
+    { version = ">=1.0.0", normalize = release_normalize, trusted_commit = HASH_B },
+    COOLDOWN_SEC, NOW)
+  h.eq(result, HASH_B,
+    "trusted_commit at highest cooled tag returned via cmp_versions")
+end
+
+h.suite("resolver: custom normalize + trusted_commit at older tag")
+do
+  local data = {
+    fetched_at = { [HASH_A] = OLD, [HASH_B] = OLD },
+    branches   = {},
+    tags       = {
+      ["release-1.0.0"] = HASH_A,  -- lower, cooled
+      ["release-2.0.0"] = HASH_B,  -- higher, cooled
+    },
+  }
+  -- trusted_commit = HASH_A (release-1.0.0) is lower than the newest cooled
+  -- (release-2.0.0 → HASH_B). cmp_versions must compare tuples correctly
+  -- and prefer the newer cooled hash over the older trusted_commit.
+  local result = resolver.resolve(data,
+    { version = ">=1.0.0", normalize = release_normalize, trusted_commit = HASH_A },
+    COOLDOWN_SEC, NOW)
+  h.eq(result, HASH_B,
+    "newest cooled tag preferred when trusted_commit is at a lower custom-named tag")
+end
+
 h.suite("resolver: branch + trusted_commit newer than cooled")
 do
   -- HASH_C is HEAD (not cooled), HASH_B is next (not cooled), HASH_A is old (cooled).

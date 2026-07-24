@@ -11,6 +11,7 @@ CONTENTS                                                      *icebox-contents*
   2. Requirements ....................................... |icebox-requirements|
   3. Installation ....................................... |icebox-installation|
   4. Concept ............................................ |icebox-concept|
+     Store keying rule ................................. |icebox-store-key|
   5. Setup .............................................. |icebox-setup|
   6. API ................................................ |icebox-api|
      icebox.setup() .................................... |icebox.setup()|
@@ -19,6 +20,8 @@ CONTENTS                                                      *icebox-contents*
      icebox.lazy.cooldown() ............................ |icebox.lazy.cooldown()|
   7. Options ............................................ |icebox-options|
   8. thaw() opts ........................................ |icebox-thaw-opts|
+     Per-call overrides ................................ |icebox-thaw-opt-overrides|
+     clone_path ........................................ |icebox-thaw-opt-clone-path|
   9. Examples ........................................... |icebox-examples|
  10. FAQ ................................................ |icebox-faq|
 
@@ -96,15 +99,40 @@ and the rules above cannot apply. Behaviour then depends on
   once. This blocks startup briefly but ensures a usable result on the
   very first run.
 
-Store files are kept in `$XDG_DATA_HOME/icebox.nvim/` (defaulting to
-`~/.local/share/icebox.nvim/`), one JSON file per repository URL.
+                                                          *icebox-store-key*
+Store keying rule ~
+
+The store file, the bare-clone cache, and the lock file for a given call are
+all keyed on the SHA-256 of a single URL string, derived as follows:
+
+  - {url} argument or `opts.url`: use the caller's string. GitHub shorthand
+    (`owner/repo`) is expanded to `https://github.com/<owner>/<repo>.git`
+    first; otherwise the string is used verbatim. `~`-prefixed paths are
+    NOT expanded — pass an already-expanded path if you need one.
+  - `opts.clone_path`: use the string returned by `git remote get-url origin`.
+    The same normalization rule as callers' URLs applies (GitHub shorthand
+    would be expanded, though in practice origin URLs never take that form).
+
+Two calls that supply the same string map to the same store. Two calls that
+supply different strings — even if they refer to the same upstream (e.g.
+`https://github.com/foo/bar` vs `git@github.com:foo/bar.git`) — map to
+different stores.
+
+Store JSON files live in `$XDG_DATA_HOME/icebox.nvim/` (defaulting to
+`~/.local/share/icebox.nvim/`). Bare-clone caches (used only for `branch`
+requests without `clone_path`) live in `$XDG_CACHE_HOME/icebox.nvim/clones/`
+(defaulting to `~/.cache/icebox.nvim/clones/`); they are updated in place
+with `git fetch` and rebuilt from scratch if missing or corrupted, so they
+may be deleted at any time. `tag` and `version` requests do not use the
+cache (they resolve via `git ls-remote`).
 
 ==============================================================================
 5. SETUP                                                        *icebox-setup*
 
-Call |icebox.setup()| once during Neovim startup, before any |icebox.thaw()|
-calls. If `setup()` is never called the default values described in
-|icebox-options| apply automatically.
+|icebox.setup()| is optional. If it is never called, |icebox.thaw()| uses
+the built-in defaults described in |icebox-options|. Call `setup()` when you
+want to change those defaults for all subsequent `thaw()` calls, or pass
+per-call overrides in `thaw()`'s `opts` (see |icebox-thaw-opt-overrides|).
 
 Example: >lua
   require("icebox").setup({
@@ -118,18 +146,36 @@ Example: >lua
 ------------------------------------------------------------------------------
 icebox.setup({opts})                                          *icebox.setup()*
 
-Configure icebox.nvim. Must be called before |icebox.thaw()| if non-default
-values are desired. May be called multiple times; later calls override earlier
-ones for the keys provided. Keys not present in {opts} retain their current
-value.
+Optional. When called, changes the defaults used by |icebox.thaw()| for the
+remainder of the Neovim session. If never called, the built-in defaults in
+|icebox-options| apply. Idempotent: each call replaces the entire config with
+the built-in defaults overlaid by {opts}, so keys omitted from {opts} always
+fall back to their defaults, regardless of any earlier call.
+
+Per-call overrides in `thaw()` opts take precedence over both `setup()`
+values and the built-in defaults. See |icebox-thaw-opt-overrides|.
 
 Parameters:
-  {opts}  (table) Configuration table. See |icebox-options|.
+  {opts}  (table|nil) Configuration table. See |icebox-options|.
 
 ------------------------------------------------------------------------------
 icebox.thaw({url}, {opts})                                    *icebox.thaw()*
 
 Resolve a cooled-down commit hash for the given repository URL.
+
+Callable in exactly one of these three forms; any other call shape is a
+parse error (WARN + |icebox.ZERO_HASH|):
+  - `thaw(url)`         — positional URL string
+  - `thaw(url, opts)`   — positional URL string + opts table
+  - `thaw(opts)`        — single opts table (URL from opts.url or opts.clone_path)
+
+URL sources are MUTUALLY EXCLUSIVE. Exactly one of the following must be
+provided:
+    {url} argument   — Git URL as a string
+    opts.url         — same, but inside the opts table
+    opts.clone_path  — URL is resolved from the clone's `origin` remote
+If more than one is specified, or none is specified, |icebox.thaw()| emits a
+|vim.notify| WARN and returns |icebox.ZERO_HASH|.
 
 Returns a 40-character lowercase hex commit hash. If no cooled commit is
 available yet, returns |icebox.ZERO_HASH|. Never returns `nil`.
@@ -142,13 +188,19 @@ state: >lua
   end
 <
 Parameters:
-  {url}   (string) Git repository URL. Supported schemes: `https`, `http`,
-          `ssh`, `git`, `git+ssh`, `file`, and the `git@host:path` shorthand.
-          The GitHub shorthand `owner/repo` (exactly two path segments, no
-          scheme) is expanded to `https://github.com/<owner>/<repo>.git`
-          before being processed. This matches the default behaviour of
-          lazy.nvim and packer.nvim. Custom hosts / SSH URLs are not covered
-          by the shorthand — pass the full URL in those cases.
+  {url}   (string|table) Either a Git repository URL string, or the
+          opts table (in the single-argument form). Supported URL forms:
+          - `https`, `http`, `ssh`, `git`, `git+ssh`, `file` schemes
+          - `git@host:path` SSH shorthand
+          - Absolute filesystem paths (`/path/to/repo.git`) — git handles
+            these directly
+          - GitHub shorthand `owner/repo` — expanded to
+            `https://github.com/<owner>/<repo>.git`. Two path segments,
+            no scheme. Custom hosts / SSH URLs are not covered — pass the
+            full URL in those cases.
+          Rejected: relative paths (`./foo`, `../foo`) and `~`-prefixed
+          paths. If you have a `~`-prefixed local path, expand it to an
+          absolute path yourself (e.g. via |expand()|) before passing it in.
 
   {opts}  (table|nil) Optional. See |icebox-thaw-opts|. At most one of
           `branch`, `tag`, `version`, or `commit` may be specified.
@@ -221,9 +273,9 @@ Example: >lua
 An existing `spec.commit` is overwritten when `icebox_options` is set.
 Omit `icebox_options` for specs that already pin their own commit.
 
-About |icebox.ZERO_HASH|: when no cooled commit is available (empty store,
-cooldown not yet elapsed, or trusted_commit ignored), |icebox.thaw()|
-returns |icebox.ZERO_HASH| and `cooldown()` assigns it to `spec.commit`.
+About |icebox.ZERO_HASH|: when no cooled commit is available (empty store
+or cooldown not yet elapsed), |icebox.thaw()| returns |icebox.ZERO_HASH|
+and `cooldown()` assigns it to `spec.commit`.
 This is intentional: |icebox.ZERO_HASH| is not a real commit, so plugin
 managers such as lazy.nvim will fail to fetch it and refuse to load the
 plugin. That failure is deliberate — it prevents adoption of any commit
@@ -426,6 +478,92 @@ trusted_commit                              *icebox-thaw-opt-trusted-commit*
       trusted_commit = "abcdef0123456789...",  -- same hash, bypasses cooldown
     })
 <
+Per-call configuration overrides                *icebox-thaw-opt-overrides*
+  Any of `cooldown_days`, `trust_on_first_use`, and `branch_commits_per_fetch`
+  may be passed in `opts` to override the |icebox.setup()| value for this one
+  call. The `setup()` value (or built-in default when `setup()` was never
+  called) is used when the key is omitted. Overrides are scoped to that call
+  only — they never leak into other URLs or subsequent calls, and they do
+  not mutate the process-wide setup values.
+
+  Types and validation match the corresponding |icebox-options| entries:
+    - `cooldown_days`            : integer >= 0
+    - `trust_on_first_use`       : boolean
+    - `branch_commits_per_fetch` : integer >= 1
+
+  Invalid values emit a warning and cause |icebox.thaw()| to return
+  |icebox.ZERO_HASH|.
+
+  Example — stretch cooldown for a single plugin: >lua
+    icebox.setup({ cooldown_days = 7 })
+    icebox.thaw("owner/repo", {
+      branch        = "main",
+      cooldown_days = 30,     -- this thaw only; other calls still use 7
+    })
+<
+clone_path                                      *icebox-thaw-opt-clone-path*
+  Type: string
+  Absolute path to an EXISTING local clone of the upstream plugin repository,
+  typically the one your plugin manager already maintains.
+
+  Conceptually equivalent to specifying `url = <clone_path's origin>`, with
+  the added optimization that `branch` history is read from this clone's
+  local objects instead of icebox's own cache under
+  `$XDG_CACHE_HOME/icebox.nvim/clones/`. Every other behaviour (default-
+  branch discovery, tag / version resolution via `ls-remote`, mutual-
+  exclusion with other URL sources, store keying) follows the URL-form
+  rules unchanged.
+
+  This is NOT an icebox-owned cache. icebox never creates, initializes, or
+  clones into `clone_path` — it only reads from and fetches into a clone
+  that another tool already owns. A missing directory is treated as a
+  configuration error (see the third constraint below), not as an instruction
+  to bootstrap a new clone there.
+
+  When `clone_path` is set, the upstream URL is taken from the repository's
+  `origin` remote (`git remote get-url origin`) and used — after the same
+  GitHub-shorthand expansion applied to caller-provided URLs, which is a
+  no-op for any realistic origin — as the store key, ls-remote target, and
+  fetch target. See |icebox-store-key| for the full keying rule.
+
+  `clone_path` is mutually exclusive with the {url} positional argument and
+  `opts.url`. If more than one URL source is specified, |icebox.thaw()|
+  emits a WARN and returns |icebox.ZERO_HASH|. See |icebox.thaw()| for the
+  full rule.
+
+  Constraints:
+    - Local reads happen for `branch` requests only. For `tag` and `version`
+      requests icebox does not read from the clone (those paths use
+      `git ls-remote`), but the origin URL is still adopted as the upstream
+      — i.e. `clone_path` still determines *which upstream* is consulted,
+      even when the clone itself is not read. For `commit` the option is
+      irrelevant (no git operation runs).
+    - Non-destructive. icebox runs exactly:
+        `git -C {clone_path} fetch --no-tags -- {origin_url} {branch}`
+      followed by:
+        `git log --first-parent FETCH_HEAD`
+      Local `refs/heads/*`, `refs/tags/*`, `refs/remotes/*`, `HEAD`, the
+      working tree, and `.git/config` are never modified. `--force`,
+      `--prune`, and `--prune-tags` are not used. The repository is never
+      removed or re-created.
+    - The path must ALREADY exist, be a valid git repository, and have an
+      `origin` remote configured. icebox does not create the directory nor
+      auto-clone into it. If any of these conditions fails, |icebox.thaw()|
+      returns |icebox.ZERO_HASH| and emits a warning — no silent fallback
+      to the icebox-managed cache.
+    - `~` in the path is expanded via `vim.fn.expand`.
+
+  Race with your plugin manager: git's own ref-locking prevents corruption,
+  but if both processes fetch at the exact same moment one of the two
+  `FETCH_HEAD` writes will be lost. In practice this is rare and
+  self-healing on the next invocation.
+
+  Example (single-table form; URL comes from origin): >lua
+    icebox.thaw({
+      clone_path = vim.fn.stdpath("data") .. "/lazy/repo",
+      branch     = "main",
+    })
+<
 ==============================================================================
 9. EXAMPLES                                                  *icebox-examples*
 
@@ -479,11 +617,9 @@ A: On the first call for a URL, the local store is empty. icebox.nvim
    `trust_on_first_use = true`; then, if `trusted_commit` is also set, that
    hash is returned as-is without a candidate-set check.
 
-Q: Where are store files kept?
-A: In `$XDG_DATA_HOME/icebox.nvim/` (default: `~/.local/share/icebox.nvim/`).
-   One JSON file is created per repository URL, named by the SHA-256 of the
-   URL. It is safe to delete these files; icebox.nvim will re-fetch on the
-   next startup.
+Q: Where are store files and caches kept, and how are they keyed?
+A: See |icebox-store-key|. Both directories are safe to delete at any time;
+   icebox rebuilds them on the next invocation.
 
 Q: Does icebox.nvim slow down Neovim startup?
 A: Only when `trust_on_first_use = true` and the store is empty for a URL.
