@@ -58,29 +58,27 @@ local function with_store_lock(url, fetch_fn)
   end)
 end
 
-local function bg_fetch(url, opts, cfg, default_branch_unknown)
+-- Background fetch dispatch.
+-- Branch path pairs the branch history fetch with an ls-remote so newly-added
+-- upstream tags are picked up too — a future fallback can then swap to the
+-- version route without waiting for the user to change opts. Version path
+-- skips the branch clone entirely (ls-remote is authoritative for tags).
+-- The default path (neither branch nor version specified) probes via
+-- ls-remote and, if the upstream has no semver tags, follows through with a
+-- branch clone against the discovered default_branch — populating the store
+-- in a single fetch pass so subsequent thaw calls do not need repeat probes.
+local function bg_fetch(url, opts, cfg)
   with_store_lock(url, function(finish)
     if opts.branch then
-      git.fetch_branch_async(url, opts.branch, cfg.branch_commits_per_fetch,
+      git.fetch_branch_and_tags_async(url, opts.branch, cfg.branch_commits_per_fetch,
         fetch_opts_for(url, opts), finish)
     elseif opts.version then
       -- version path ignores clone_path — ls-remote is authoritative.
       git.fetch_tags_async(url, finish)
-    elseif default_branch_unknown then
-      git.fetch_branch_async(url, nil, cfg.branch_commits_per_fetch,
-        fetch_opts_for(url, opts), finish)
+    else
+      git.fetch_default_async(url, fetch_opts_for(url, opts),
+        cfg.branch_commits_per_fetch, finish)
     end
-  end)
-end
-
--- Schedule a background ls-remote to seed default_branch + tags for a URL
--- whose store is empty and no branch/version was requested.
--- Used only by the empty-store-default path; bg_fetch handles all other cases.
-local function schedule_symref_probe(url)
-  vim.schedule(function()
-    with_store_lock(url, function(finish)
-      git.fetch_tags_async(url, finish)
-    end)
   end)
 end
 
@@ -198,12 +196,10 @@ function M.thaw(url_or_opts, opts)
   -- Conceptually there are two fallback routes:
   --   (a) if the store has semver tags → behave as `version = ">=0.0.0"`
   --   (b) otherwise                    → behave as `branch = <default_branch>`
-  -- The remaining branches below are NOT part of the conceptual fallback:
-  -- they handle the error/bootstrap case where the store has no information
-  -- at all (no tags AND no cached default_branch), i.e. we cannot pick
-  -- either (a) or (b). In that case we either schedule a background probe
-  -- and return ZERO_HASH (TOFU=false) or kick off a synchronous fetch that
-  -- discovers default_branch by cloning HEAD (TOFU=true).
+  -- If the store has neither cached tags nor a cached default_branch yet, we
+  -- leave opts untouched so bg_fetch dispatches to fetch_default_async, which
+  -- probes upstream and — when no semver tags exist — follows through with a
+  -- branch clone against the discovered default_branch in the same pass.
   local resolved_kind = opts.branch or opts.version
   -- default_branch_unknown: branch not specified and not yet cached in store.
   local default_branch_unknown = false
@@ -213,9 +209,9 @@ function M.thaw(url_or_opts, opts)
     elseif data.default_branch then
       opts = vim.tbl_extend("keep", opts, { branch = data.default_branch })
     elseif not cfg.trust_on_first_use then
-      -- Bootstrap: empty store, no branch/version, no default_branch.
-      -- kick off a BG probe to seed default_branch + tags, and return zero.
-      schedule_symref_probe(url)
+      -- Empty store, no branch/version, no default_branch: schedule a probe
+      -- (ls-remote + fallback branch fetch) and return zero for this call.
+      vim.schedule(function() bg_fetch(url, opts, cfg) end)
       return ZERO_HASH
     else
       -- Bootstrap under trust_on_first_use=true: sync fetch with branch=nil
@@ -227,19 +223,19 @@ function M.thaw(url_or_opts, opts)
   -- 7. Main resolve from store
   if store.has_records(data) then
     local result = resolver.resolve(data, opts, cooldown_sec, now)
-    vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
+    vim.schedule(function() bg_fetch(url, opts, cfg) end)
     return result or ZERO_HASH
   end
 
   -- 8. fetched_at is empty (first time for this URL)
   if not cfg.trust_on_first_use then
-    vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
+    vim.schedule(function() bg_fetch(url, opts, cfg) end)
     return ZERO_HASH
   end
 
   -- trust_on_first_use=true
   if opts.trusted_commit then
-    vim.schedule(function() bg_fetch(url, opts, cfg, default_branch_unknown) end)
+    vim.schedule(function() bg_fetch(url, opts, cfg) end)
     return opts.trusted_commit
   end
 

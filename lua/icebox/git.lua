@@ -1,6 +1,7 @@
 local M = {}
 
 local validate = require("icebox.validate")
+local semver   = require("icebox.semver")
 
 local CLONE_SAFETY_ARGS = {
   "--no-local",
@@ -275,6 +276,78 @@ local function fetch_tags_impl(url)
   }
 end
 
+-- Returns true if `tags` (a name→hash map) contains at least one semver tag.
+local function has_semver_tags(tags)
+  for name, _ in pairs(tags) do
+    if semver.is_semver_tag(name) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Merge b's fields into a. `a` and `b` are new_data-shaped tables produced by
+-- the fetch pipelines above. Later writes win where they conflict; missing
+-- fields on `b` leave `a` unchanged.
+local function merge_new_data(a, b)
+  if not b then return a end
+  if b.default_branch then a.default_branch = b.default_branch end
+  for hash, ts in pairs(b.fetched_at or {}) do
+    if a.fetched_at[hash] == nil then
+      a.fetched_at[hash] = ts
+    end
+  end
+  for branch, hashes in pairs(b.branches or {}) do
+    a.branches[branch] = hashes
+  end
+  for tag, hash in pairs(b.tags or {}) do
+    a.tags[tag] = hash
+  end
+  return a
+end
+
+-- Probe pipeline used when the caller did not specify branch/version and the
+-- store has no cached default_branch. Runs `ls-remote --symref` first; if
+-- upstream has no semver tags, falls back to a branch fetch against the
+-- discovered default_branch so a single thaw call fully populates the store.
+local function fetch_default_impl(url, opts, limit)
+  local tags_data, tags_err = fetch_tags_impl(url)
+  if not tags_data then return nil, tags_err end
+
+  if has_semver_tags(tags_data.tags) then
+    return tags_data
+  end
+
+  -- No semver tags: fall back to a branch fetch against default_branch so the
+  -- first thaw call fully populates the store.
+  local branch = tags_data.default_branch
+  if not branch then
+    -- ls-remote gave us no symref; keep whatever tag info we managed to grab.
+    return tags_data
+  end
+  local branch_data, branch_err = fetch_branch_impl(url, branch, limit, opts)
+  if not branch_data then
+    return nil, branch_err
+  end
+  return merge_new_data(branch_data, { tags = tags_data.tags })
+end
+
+-- Branch fetch pipeline that also refreshes tags via ls-remote in the same
+-- pass. This is the bg_fetch path for callers who pinned a branch: once a
+-- branch has been chosen, we still want to notice new tags appearing upstream
+-- so a future fallback can switch to the version route.
+local function fetch_branch_and_tags_impl(url, branch, limit, opts)
+  local branch_data, branch_err = fetch_branch_impl(url, branch, limit, opts)
+  if not branch_data then return nil, branch_err end
+
+  local tags_data, tags_err = fetch_tags_impl(url)
+  if not tags_data then
+    -- Branch fetch already succeeded; surfacing tags-only failure is enough.
+    return branch_data, tags_err
+  end
+  return merge_new_data(branch_data, { tags = tags_data.tags })
+end
+
 -- ─── Sync/async wrappers ────────────────────────────────────────────────────
 --
 -- Sync entry points invoke the pipeline directly (no coroutine → run_cmd
@@ -304,6 +377,26 @@ end
 function M.fetch_tags_async(url, on_done)
   run_async_pipeline(function()
     return fetch_tags_impl(url)
+  end, on_done)
+end
+
+function M.fetch_default_sync(url, opts, limit)
+  return fetch_default_impl(url, opts, limit)
+end
+
+function M.fetch_default_async(url, opts, limit, on_done)
+  run_async_pipeline(function()
+    return fetch_default_impl(url, opts, limit)
+  end, on_done)
+end
+
+function M.fetch_branch_and_tags_sync(url, branch, limit, opts)
+  return fetch_branch_and_tags_impl(url, branch, limit, opts)
+end
+
+function M.fetch_branch_and_tags_async(url, branch, limit, opts, on_done)
+  run_async_pipeline(function()
+    return fetch_branch_and_tags_impl(url, branch, limit, opts)
   end, on_done)
 end
 

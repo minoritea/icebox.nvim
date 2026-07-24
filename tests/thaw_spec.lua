@@ -508,4 +508,121 @@ do
   vim.fn.delete(isolated_bare, "rf")
 end
 
+-- ─── probe fallback (fetch_default) ──────────────────────────────────────────
+
+-- Build an isolated bare repo that has NO tags. Used by the probe-fallback
+-- suites below to exercise the branch-clone fallback when ls-remote finds no
+-- semver tags upstream.
+local function build_tagless_bare()
+  local work_dir = vim.fn.tempname() .. "-tagless-work"
+  local bare_dir = vim.fn.tempname() .. "-tagless.git"
+  vim.fn.mkdir(work_dir, "p")
+  vim.system({ "git", "-C", work_dir, "init", "-q", "-b", "main" },
+             { text = true }):wait()
+  vim.system({ "git", "-C", work_dir, "config", "user.email", "test@icebox" },
+             { text = true }):wait()
+  vim.system({ "git", "-C", work_dir, "config", "user.name", "Test" },
+             { text = true }):wait()
+  local f = io.open(work_dir .. "/file.txt", "w"); f:write("hi\n"); f:close()
+  vim.system({ "git", "-C", work_dir, "add", "file.txt" }, { text = true }):wait()
+  vim.system({ "git", "-C", work_dir, "commit", "-q", "-m", "c1" },
+             { env = { GIT_AUTHOR_DATE = "2024-01-01T00:00:00+00:00",
+                       GIT_COMMITTER_DATE = "2024-01-01T00:00:00+00:00",
+                       PATH = vim.env.PATH },
+               text = true }):wait()
+  vim.system({ "git", "clone", "-q", "--bare", work_dir, bare_dir },
+             { text = true }):wait()
+  vim.fn.delete(work_dir, "rf")
+  return bare_dir
+end
+
+h.suite("thaw probe fallback: tagless upstream populates branch history in one pass")
+do
+  vim.wait(2000, function() return false end, 20)
+  reset_all()
+
+  local tagless_bare = build_tagless_bare()
+  local tagless_url  = "file://" .. tagless_bare
+
+  icebox.setup({})
+  local got = icebox.thaw(tagless_url)
+  h.eq(got, icebox.ZERO_HASH,
+    "first keyless call on empty store returns zero hash")
+
+  -- After the bg fetch completes, both default_branch and the branch commit
+  -- history should be populated in a single pass (probe fallback: ls-remote
+  -- discovers there are no semver tags, then branch-fetches default_branch).
+  local settled = vim.wait(5000, function()
+    local d = store.read(tagless_url)
+    return d.default_branch == "main"
+       and d.branches["main"]
+       and #d.branches["main"] >= 1
+  end, 20)
+  h.is_true(settled, "probe fallback populated default_branch + branches in one pass")
+
+  local d = store.read(tagless_url)
+  h.eq(d.default_branch, "main",           "default_branch populated")
+  h.is_true(#d.branches["main"] >= 1,      "branches.main has at least one commit")
+  h.is_true(next(d.tags) == nil,           "tags remain empty for tagless upstream")
+
+  vim.fn.delete(tagless_bare, "rf")
+end
+
+h.suite("thaw probe fallback: upstream with tags stays on ls-remote-only")
+do
+  vim.wait(2000, function() return false end, 20)
+  reset_all()
+
+  icebox.setup({})
+  local got = icebox.thaw(repo_url)
+  h.eq(got, icebox.ZERO_HASH,
+    "first keyless call on empty store returns zero hash")
+
+  -- Fixture repo has semver tags, so fetch_default_async must NOT follow
+  -- through with a branch clone; only tags + default_branch land in the store.
+  local settled = vim.wait(5000, function()
+    local d = store.read(repo_url)
+    return next(d.tags) ~= nil
+  end, 20)
+  h.is_true(settled, "tags populated within timeout")
+
+  local d = store.read(repo_url)
+  h.is_true(d.tags["v1.0.0"] ~= nil,       "tags include v1.0.0")
+  h.is_true(next(d.branches) == nil,
+    "branches remain empty (branch clone skipped when tags exist)")
+end
+
+h.suite("thaw branch bg_fetch: newly added upstream tags are picked up")
+do
+  vim.wait(2000, function() return false end, 20)
+  reset_all()
+
+  -- Start with a tagless upstream so probe fallback populates the branch route.
+  local mutable_bare = build_tagless_bare()
+  local mutable_url  = "file://" .. mutable_bare
+
+  icebox.setup({})
+  icebox.thaw(mutable_url)  -- probe fallback populates default_branch + main
+
+  local branch_ready = vim.wait(5000, function()
+    local d = store.read(mutable_url)
+    return d.branches["main"] and #d.branches["main"] >= 1
+  end, 20)
+  h.is_true(branch_ready, "branch history populated by probe fallback")
+
+  -- Now the upstream sprouts a new semver tag out-of-band.
+  vim.system({ "git", "-C", mutable_bare, "tag", "v3.0.0" },
+             { text = true }):wait()
+
+  -- Second thaw call takes the branch route (default_branch cached), so
+  -- fetch_branch_and_tags_async should pick up the new tag as a side effect.
+  icebox.thaw(mutable_url)
+  local tag_seen = vim.wait(5000, function()
+    return store.read(mutable_url).tags["v3.0.0"] ~= nil
+  end, 20)
+  h.is_true(tag_seen, "branch bg_fetch surfaced the newly added tag")
+
+  vim.fn.delete(mutable_bare, "rf")
+end
+
 h.summary()
