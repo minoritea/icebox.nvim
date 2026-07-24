@@ -4,43 +4,13 @@ Cooldown-based commit resolver for Neovim.
 
 icebox.nvim returns the most recent commit hash for a Git repository that has been "in the icebox" for at least a configurable number of days. Use it with your plugin manager's commit-pinning feature to avoid adopting freshly released commits before bugs — or malicious changes — have had time to surface.
 
-## Motivation
+## Why
 
-Software supply-chain attacks against open-source packages have become a routine occurrence. Attackers compromise maintainer accounts (or introduce hostile commits through other means) and publish a poisoned release; users who auto-update within minutes are the first to be hit. A well-known mitigation is a **minimum release age** — refuse to install a version until it has been visible for at least N days, so that a malicious release has a chance to be noticed and revoked before it is adopted. Some package managers, notably pnpm, expose a `minimumReleaseAge` option in this direction, and similar proposals have been discussed in other ecosystems.
+Supply-chain attacks against Neovim plugins are a real threat. icebox.nvim brings a **minimum release age** style mitigation to the ecosystem: a commit is not adopted until it has been publicly visible for a cooldown period, giving you time to notice a malicious release and pull it before it reaches your editor.
 
-Neovim's plugin ecosystem does not have this affordance. Plugins are distributed almost exclusively as Git repositories on hosts like GitHub, and popular plugin managers pull the latest commit (or the newest tag) without any built-in delay. A compromised maintainer's push propagates to users on their next `:Lazy update` / `:PackerSync` / equivalent.
+The natural place to anchor such a cooldown would be the timestamps inside a Git commit, but every one of them (author date, committer date, annotated-tag date, ref mtimes) is written by whoever produced the commit. An attacker who controls the upstream can set them to anything, so they cannot mark a trustworthy publication time.
 
-The obvious question is: **can we implement "minimum release age" using the timestamps already present in Git?** For the plain Git distribution model used by Neovim plugins, the answer is no — every timestamp such a repository exposes is under the attacker's control:
-
-- **Author date / committer date** are arbitrary strings written into the commit object. Anyone with push access can set them to whatever value makes their commit look aged (`GIT_COMMITTER_DATE`, `git commit --date`, `git rebase --committer-date-is-author-date`, etc.).
-- **Tag creation date** on annotated tags is likewise attacker-controlled at tag-creation time.
-- **`refs/tags/*` / `refs/heads/*` mtimes** exist only on the server's filesystem and are not exposed over the Git protocol.
-- Even if a timestamp *were* trustworthy, an attacker who has already replaced the upstream can also rewrite history and force-push, invalidating any prior observation of "old" commits.
-
-Signed tags/commits with reproducible timestamping, or transparency logs such as Sigstore/Rekor, could in principle anchor a trustworthy publication time, but the Neovim plugin ecosystem does not use these mechanisms in a way plugin managers can rely on. In practice, no server-side timestamp a plain Git client sees can be trusted as "this commit has been publicly available for N days."
-
-## Approach
-
-icebox.nvim's approach is to **ignore all remote-provided timestamps and instead measure age from the moment this machine first observed the commit**. On every fetch the plugin records, per commit hash, the local `os.time()` at which it first became visible. Only commits whose local observation timestamp is at least `cooldown_days` old are eligible to be returned.
-
-Concretely:
-
-- The first time `thaw()` sees a commit hash, it is stamped with the current local time in a JSON store under `$XDG_DATA_HOME/icebox.nvim/`.
-- Subsequent fetches never overwrite an existing timestamp, so each commit's "first observation" time is monotonic on this machine.
-- `thaw()` returns the newest commit in the requested candidate set (branch history / tag / semver range) whose observation age has reached the cooldown. Anything more recent is withheld until it has aged locally.
-
-Note that the observation timestamp is local: it measures how long the commit has been sitting in *your* store, not how long it has existed publicly. On a freshly installed machine, initial observations are inevitably "young" regardless of the commit's true age — see the notes on `trust_on_first_use` and initial installation below.
-
-Why this is a meaningful defense:
-
-- **The clock cannot be moved by the attacker.** The trust anchor is your own filesystem, not any Git metadata. A poisoned commit force-pushed today is treated as brand new even if it claims a committer date from 2020.
-- **A malicious commit has time to be noticed before it is adopted.** During the cooldown window on your machine, the commit exists on the remote and can be reported and revoked by others. If the upstream removes it before your cooldown elapses, the next fetch drops it from the candidate set and you never adopt it — even though its local `fetched_at` remains recorded. Note that this depends on someone *else* noticing; the cooldown does not by itself detect malicious changes, it only creates a window during which detection can prevent adoption.
-- **The default behavior fails safely on first observation.** When the store is empty for a URL, `thaw()` returns `ZERO_HASH` and schedules a background fetch; nothing gets pinned until the cooldown has been served on a subsequent startup. This means a machine that installs icebox on a day when the upstream is already compromised does not auto-adopt that state — but it also means no version is pinned at all until the store has aged. See `trust_on_first_use` for the opt-in escape hatch and its trade-offs.
-- **`trusted_commit` lets you name a specific hash you have vetted.** In the normal path (populated store), it takes effect only when the hash belongs to the candidate set implied by `branch` / `tag` / `version` / `commit`, and `thaw()` returns whichever of `{trusted_commit, newest-cooled}` is newer. This lets you adopt a specific reviewed commit immediately without waiting for the cooldown, while still falling back to the cooldown-gated resolution once newer commits qualify. See the [`trusted_commit` semantics](#trusted_commit-semantics) section for the empty-store special case.
-- **`trust_on_first_use = true` is an opt-in that trades this guarantee for a hash on the very first run.** When enabled and the store is empty for the URL, the initial call returns `trusted_commit` as-is if it is set (no candidate-set check, since there is no candidate set yet), otherwise it performs a synchronous fetch and returns the newest matching commit with the cooldown bypassed *once*. This is convenient for bootstrapping but leaves the initial-install-day window unprotected: if you install icebox on a day when the upstream is already compromised, that state will be adopted immediately. Prefer the default (`false`) unless you know the upstream is currently in a state you would sign off on manually.
-- **No new infrastructure required.** Plugin authors do not need to sign releases, publish a manifest, or run a registry. Any Git host works. The mechanism is a thin wrapper around each plugin manager's existing commit-pinning feature.
-
-icebox.nvim is not a substitute for signed releases or reproducible builds, and it cannot defend against an attack that remains undetected for the full cooldown window. It is a low-effort, defense-in-depth layer that converts "we adopt the upstream head within minutes" into "we adopt it after N days of quiet exposure."
+icebox.nvim instead measures elapsed time from the point at which your local machine first observed each commit hash. That clock is the one thing an attacker cannot rewind. The cooldown is exposed as a simple function that returns a commit hash once its local observation has aged past a configurable threshold; hand that hash to your plugin manager's existing commit-pinning feature and you are done.
 
 ## Requirements
 
@@ -61,27 +31,28 @@ Then add it to your runtimepath at the top of `init.lua`, before your plugin man
 vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/icebox.nvim")
 ```
 
+## Cooldown
+
+A **cooldown** is the delay between the first time your local machine observes a commit and the moment icebox.nvim is willing to return it. Every commit hash icebox sees is stamped with the local `os.time()` on first observation and persisted to a JSON file on disk; only commits whose stored stamp is at least `cooldown_days` old are eligible to be returned. Anything younger is withheld.
+
+Think of icebox.nvim as a freezer: commits arrive, sit inside for the cooldown period, and only come out once they are chilled enough to serve.
+
 ## Usage
 
-`setup()` is optional. If never called, `thaw()` uses the built-in defaults (`cooldown_days = 7`, `trust_on_first_use = false`, `branch_commits_per_fetch = 500`). Call `setup()` to change those defaults for all subsequent `thaw()` calls, or pass per-call overrides in `thaw()`'s `opts` (see [Per-call overrides](#per-call-overrides)).
+`setup()` is optional.
 
 ```lua
 local icebox = require("icebox")
 
 icebox.setup({
   cooldown_days      = 7,
-  trust_on_first_use = false,  -- default; keep it off unless you know why
+  trust_on_first_use = true,  -- opt-in; see the note below
 })
 
-return {
-  {
-    "nvim-telescope/telescope.nvim",
-    commit = icebox.thaw("https://github.com/nvim-telescope/telescope.nvim"),
-  },
-}
+local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand it to your plugin manager
 ```
 
-On the first startup the local store is empty, so `thaw()` returns the zero hash and schedules a background fetch. From the second startup onward a real commit hash is returned once the cooldown has elapsed.
+**Note.** Observations are recorded in the background, so the very first call for a URL has nothing cooled to return and fails by default. You can opt out of this by setting `trust_on_first_use = true`, which returns the latest upstream commit on that first call without waiting for the cooldown. Alternatively, pass the `trusted_commit` option to `thaw()` to trust a specific commit for an individual repository. Both are opt-in escape hatches; use them at your own discretion.
 
 ## API
 
@@ -95,135 +66,49 @@ On the first startup the local store is empty, so `thaw()` returns the zero hash
 
 ### `icebox.thaw(url, opts)` / `icebox.thaw(opts)`
 
-Returns a 40-character commit hash, or `icebox.ZERO_HASH` if no cooled commit is available yet.
+Given a repository URL, returns the newest cooled commit hash. GitHub shorthand (`owner/repo`) is also accepted. `icebox.ZERO_HASH` is returned when no cooled commit is available yet or when an error occurs.
 
 ```lua
--- Check whether a usable hash was returned
-local hash = icebox.thaw(url)
-if hash == icebox.ZERO_HASH then
-  -- not ready yet
-end
+local commit = icebox.thaw("stevearc/oil.nvim")
 ```
 
-The GitHub shorthand `owner/repo` is also accepted and expanded to `https://github.com/<owner>/<repo>.git` internally (same convention as lazy.nvim / packer.nvim). Use a full URL for non-GitHub hosts or SSH. Absolute filesystem paths (`/path/to/repo.git`) are accepted as-is; git handles them directly. `~` in URLs is rejected — expand it to an absolute path yourself (e.g. via `vim.fn.expand`) before passing it in.
+Each `thaw()` call also triggers a background fetch of the repository's commit history. Newly-seen commits are recorded with their first-observation time and become available to subsequent calls. By default, that fetch keeps a persistent bare clone under `$XDG_CACHE_HOME/icebox.nvim/clones/`, so subsequent calls reuse the local objects instead of re-cloning.
 
-```lua
-commit = icebox.thaw("nvim-telescope/telescope.nvim")
-```
+To customize a call, pass an options table as the second argument (or as the first argument if you omit the URL). The recognized keys are:
 
-The URL can also be provided as `opts.url` (allowing the single-table form `thaw(opts)`), or resolved automatically from the `origin` of a `clone_path` (see [`clone_path`](#clone_path)). The three URL sources — the positional `url` argument, `opts.url`, and `opts.clone_path` — are **mutually exclusive**: specifying more than one emits a warning and returns `ZERO_HASH`. Specifying none does the same.
-
-**`opts`** — at most one of `branch` / `tag` / `version` / `commit` may be specified. Each defines a *candidate set*; `thaw()` returns the newest cooled commit in that set (see [How it works](#how-it-works)). `trusted_commit` is an orthogonal modifier that can bypass the wait for hashes already in the candidate set.
-
-| Key | Type | Candidate set / description |
+| Key | Type | Description |
 |-----|------|-------------|
+| `url` | string | The Git URL, useful with the single-table form `thaw(opts)`. Mutually exclusive with the positional `url` argument and `clone_path`. |
+| `clone_path` | string | Absolute path to an existing clone maintained by another tool (e.g. your plugin manager). The upstream URL is read from that clone's `origin` remote, and its objects are reused for `branch` history in place of icebox's own cache. Mutually exclusive with the positional `url` argument and `opts.url`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 | `branch` | string | Newest-first history of that branch, capped at `branch_commits_per_fetch` commits. |
 | `tag` | string | The single commit the tag points at. |
 | `version` | string | All tags in the store whose semver matches the range (`^1.0.0`, `~1.2.3`, `>=2.0.0`, …). Highest match wins among cooled tags. |
 | `commit` | string | The single specified hash. Fully offline; cooldown starts from first observation. |
-| `trusted_commit` | string | Hash trusted by the user. In the normal path, bypasses cooldown *only when it belongs to the candidate set* — see [`trusted_commit` semantics](#trusted_commit-semantics). |
-| `cooldown_days` | number | Per-call override of the setup value. See [Per-call overrides](#per-call-overrides). |
-| `trust_on_first_use` | boolean | Per-call override of the setup value. See [Per-call overrides](#per-call-overrides). |
-| `branch_commits_per_fetch` | number | Per-call override of the setup value. See [Per-call overrides](#per-call-overrides). |
-| `clone_path` | string | Absolute path to an existing clone managed by another tool. Reuses that repository's objects for `branch` history instead of icebox's own cache. See [`clone_path`](#clone_path). |
+| `trusted_commit` | string | Hash trusted by the user. In the normal path, bypasses the cooldown only when it belongs to the candidate set. See [`doc/icebox.txt`](doc/icebox.txt) for the full resolution rules and empty-store exception. |
+| `cooldown_days` | number | Overrides the `setup()` value for this call. |
+| `trust_on_first_use` | boolean | Overrides the `setup()` value for this call. |
+| `branch_commits_per_fetch` | number | Overrides the `setup()` value for this call. |
+| `normalize` | function | Custom tag-name normalizer used with `version`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 
-The URL itself (`opts.url` for the single-table form) is described in the paragraph above the table; see the mutual-exclusion rules there.
-
-Advanced options such as `normalize` (custom semver tag naming) are documented in [`doc/icebox.txt`](doc/icebox.txt).
-
-If none of the above is specified, icebox.nvim falls back to:
-
-1. Newest cooled semver tag (`>=0.0.0`), if any tags are already known.
-2. Tip of the default branch, if `default_branch` has been recorded.
-3. Otherwise, `ZERO_HASH` plus a background `git ls-remote` to seed both. The next invocation will fall into (1) or (2). With `trust_on_first_use = true` the fetch runs synchronously and returns immediately.
-
-#### `trusted_commit` semantics
-
-`trusted_commit` is a hash you assert as safe. In the normal (populated-store) path, it is not a blanket fallback — it only takes effect when the hash is actually part of the candidate set that the selected option produces:
-
-1. Extract candidate commits from the store:
-   - `branch` → history of that branch (newest-first array, from `git log --first-parent`)
-   - `version` → tags matching the semver range
-   - `tag` / `commit` → the single referenced commit
-2. Find the newest cooled-down commit within that set.
-3. If `trusted_commit` is set **and** appears in the candidate set, return whichever of `{trusted_commit, newest-cooled}` is newer.
-   - "newer" means smaller array index for `branch`, higher semver for `version`, or identity for `tag` / `commit`. Timestamps on the commit object are never consulted.
-4. Otherwise return the newest cooled commit, or `ZERO_HASH` if none.
-
-Concretely: for `branch = "main", trusted_commit = <HEAD>`, the tip of `main` is returned immediately without waiting for its cooldown. For `version = "^1.0.0", trusted_commit = <v1.3.0 hash>`, `v1.3.0` is returned even before its cooldown. A `trusted_commit` that is *not* in the candidate set (e.g. a hash off the branch, or pointing at a tag outside the range) is ignored.
-
-**Empty-store exception.** When the local store has no records for the URL yet, no candidate set exists, so the rule above cannot apply. Behaviour then depends on `trust_on_first_use`:
-
-- `trust_on_first_use = false` (default): `trusted_commit` is **ignored** and `thaw()` returns `ZERO_HASH`. The very first observation is always withheld — including any user-supplied hash — so a machine that installs icebox on a day when the upstream is already compromised does not adopt anything from that first fetch. Re-run after at least one background fetch has recorded observations.
-- `trust_on_first_use = true`: if `trusted_commit` is set, it is returned **as-is without a candidate-set check**. This is the opt-in escape hatch for bootstrapping (see `trust_on_first_use` below).
-
-Also note that the candidate set for `branch` is capped at `branch_commits_per_fetch` (default 500) commits. A `trusted_commit` older than that window is treated as "outside the candidate set" and will be ignored in the normal path.
-
-#### Per-call overrides
-
-`cooldown_days` / `trust_on_first_use` / `branch_commits_per_fetch` can be passed in `opts` to override the `setup()` value for a single `thaw()` call only. The `setup()` value (or built-in default when `setup()` was never called) is used when the key is omitted. Overrides are scoped to that call and never leak into other URLs or subsequent calls.
-
-```lua
-icebox.setup({ cooldown_days = 7 })
-
--- Wait 30 days for this one plugin only; other thaws still use 7 days.
-icebox.thaw("owner/repo", { branch = "main", cooldown_days = 30 })
-```
-
-Use cases include stretching the cooldown for plugins you consider higher-risk, or opting a single well-vetted plugin into `trust_on_first_use = true` without loosening the default posture.
-
-#### `clone_path`
-
-`clone_path` points to an existing clone that another tool (typically your plugin manager) already maintains. Conceptually equivalent to specifying `url = <clone_path's origin>`, with the added optimization that `branch` history is read from that clone's local objects instead of icebox maintaining its own bare clone under `$XDG_CACHE_HOME/icebox.nvim/clones/`. Every other behaviour (default-branch discovery, tag / version resolution via `ls-remote`, mutual-exclusion with other URL sources, store keying) follows the URL-form rules unchanged. This is *not* an icebox-owned cache — icebox never creates, initializes, or clones into the path.
-
-`clone_path` cannot be combined with the positional `url` argument or `opts.url` — the three URL sources are mutually exclusive (see [`icebox.thaw`](#iceboxthawurl-opts--iceboxthawopts)).
-
-```lua
--- URL is resolved from the local clone's origin; no URL argument needed.
-icebox.thaw({
-  clone_path = vim.fn.stdpath("data") .. "/lazy/repo",
-  branch     = "main",
-})
-```
-
-Constraints:
-
-- **Local reads happen for `branch` requests only.** For `tag` / `version` requests icebox does not read from the clone (those paths use `git ls-remote`), but the origin URL is still adopted as the upstream for the store key and the ls-remote target — `clone_path` still determines *which upstream* is consulted, even when the clone itself is not read. For `commit` the option is irrelevant (no git operation runs).
-- **Non-destructive.** icebox runs exactly `git -C {clone_path} fetch --no-tags -- {origin_url} {branch}` followed by `git log --first-parent FETCH_HEAD`. Local `refs/heads/*`, `refs/tags/*`, `refs/remotes/*`, `HEAD`, the working tree, and `.git/config` are never modified. `--force`, `--prune`, and `--prune-tags` are not used, and the repository is never removed or re-created.
-- **The path must already exist as a valid git repository with an `origin` remote.** icebox never creates, initializes, or clones into `clone_path` — it only reads from and fetches into an existing clone that another tool owns. If the directory is missing, is not a git repository, or has no `origin`, `thaw()` returns `ZERO_HASH` and emits a warning; it does not silently fall back to the icebox-managed cache. This is intentional: passing `clone_path` is an explicit statement about where to look, and a silent fallback could mask a configuration error.
-- **Concurrent fetches with your plugin manager may race on `FETCH_HEAD`.** git's own ref locking prevents corruption, but if both fetches run at exactly the same moment one of the two `FETCH_HEAD` values will be lost. In practice this is rare and self-healing on the next invocation.
-
-### Cache directory
-
-For `branch` requests without `clone_path`, icebox maintains a persistent bare clone at `$XDG_CACHE_HOME/icebox.nvim/clones/{url_sha256}/` (default `~/.cache/icebox.nvim/clones/`) and updates it in place via `git fetch origin <branch>`. This avoids re-cloning on every startup.
-
-The cache is not required to be permanent — it may be removed at any time by the user or a system cache-cleaning tool. icebox verifies the cache is healthy on each run (`rev-parse --git-dir` must resolve to the cache directory itself) and rebuilds from scratch when it is missing or corrupted. No explicit garbage collection is performed; git's built-in auto-gc handles maintenance.
-
-For `tag` / `version` requests the cache is not used — those paths resolve entirely through `git ls-remote`.
+When none of `branch`, `tag`, `version`, or `commit` (which are mutually exclusive) is specified, icebox.nvim treats the call as if the latest semver tag were requested when the repository has any semver tags, or as if the default branch were requested otherwise.
 
 ### `icebox.ZERO_HASH`
 
-The sentinel value (`"0000000000000000000000000000000000000000"`) returned when no cooled commit is available. It is deliberately an invalid commit hash: passing it to a plugin manager as `commit = ...` is expected to fail loudly rather than silently adopt some other version, which enforces the cooldown as a hard gate.
+The value returned when no cooled commit is available or an error occurs. It is an all-zero Git hash string, which Git treats as an invalid commit hash. When combining with a plugin manager, the recommended usage is to pass it through unchanged and let the plugin manager fail on it.
 
 ### `icebox.lazy.cooldown(spec)`
 
-Helper for [lazy.nvim](https://github.com/folke/lazy.nvim). Wraps a single plugin spec: if `spec.icebox_options` is set, calls `icebox.thaw()` with the spec's identifier (`spec[1]` / `spec.url` / `file://spec.dir`) and the given options, and assigns the result to `spec.commit`. Specs without `icebox_options` are returned untouched.
-
-The spec is mutated in place and also returned, so it works directly with `vim.tbl_map`:
+Helper for lazy.nvim. Given a lazy plugin spec, if `spec.icebox_options` is set, it calls `thaw(spec[1] or spec.url or spec.dir, spec.icebox_options)` and pins the returned commit onto the spec before returning it.
 
 ```lua
 local cooldown = require("icebox.lazy").cooldown
 
 require("lazy").setup(vim.tbl_map(cooldown, {
-  { "nvim-telescope/telescope.nvim", icebox_options = { branch = "master" } },
-  { "folke/tokyonight.nvim",         icebox_options = { version = "^1.0.0" } },
-  { "plain/plugin" },                            -- no icebox_options → passed through
+  { "ibhagwan/fzf-lua",     icebox_options = { branch = "main" } },
+  { "stevearc/oil.nvim",    icebox_options = { version = "^1.0.0" } },
+  { "github/copilot.vim" }, -- no icebox_options → passed through
 }))
 ```
-
-An existing `spec.commit` is overwritten when `icebox_options` is set; omit `icebox_options` for specs that already pin their own commit.
-
-**About `ZERO_HASH`.** When no cooled commit is available (empty store or cooldown not yet elapsed), `thaw()` returns `icebox.ZERO_HASH`, and `cooldown()` assigns it to `spec.commit`. This is intentional: `ZERO_HASH` is not a real commit, so plugin managers such as lazy.nvim will fail to fetch it and refuse to load the plugin. That failure is a *feature* — it prevents adoption of any commit before the cooldown has served, at the cost of a startup error. To avoid the error on the very first run, either supply a vetted `trusted_commit` in `icebox_options` (with `trust_on_first_use = true`), or omit `icebox_options` and pin manually until the store has aged.
 
 ## How it works
 
@@ -241,11 +126,9 @@ resolve request
       4. else return (2), or ZERO_HASH + schedule BG fetch
 ```
 
-The BG fetch step reads from either the [cache directory](#cache-directory) (default) or [`clone_path`](#clone_path) when the caller supplied one.
+The BG fetch step reads from either the cache directory (default) or `clone_path` when the caller supplied one.
 
-Store files live in `$XDG_DATA_HOME/icebox.nvim/` (default: `~/.local/share/icebox.nvim/`), one file per URL string passed to `thaw()`. They can be safely deleted; icebox.nvim will re-fetch on the next startup.
-
-Bare clones used for `branch` history live under `$XDG_CACHE_HOME/icebox.nvim/clones/` (default: `~/.cache/icebox.nvim/clones/`) and are similarly safe to delete — icebox rebuilds them on demand.
+The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository.
 
 ## License
 
