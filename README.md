@@ -45,14 +45,14 @@ Think of icebox.nvim as a freezer: commits arrive, sit inside for the cooldown p
 local icebox = require("icebox")
 
 icebox.setup({
-  cooldown_days      = 7,
-  trust_on_first_use = true,  -- opt-in; see the note below
+  cooldown_days     = 7,
+  trust_initial_pin = true,  -- opt-in; see the note below
 })
 
 local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand it to your plugin manager
 ```
 
-**Note.** Observations are recorded in the background, so the very first call for a URL has nothing cooled to return and fails by default. You can opt out of this by setting `trust_on_first_use = true`, which returns the latest upstream commit on that first call without waiting for the cooldown. Alternatively, pass the `trusted_commit` option to `thaw()` to trust a specific commit for an individual repository. Both are opt-in escape hatches; use them at your own discretion.
+**Note.** `thaw()` runs a synchronous fetch — and blocks briefly on that one call — the first time it sees a given (repository, route) pair, where a "route" is `branch = <name>`, `version = <range>`, or the fallback used when neither is specified. Adding a new plugin, switching a plugin from `branch` to `version`, or renaming the pinned branch all trip a fresh sync fetch. Once the route has been fetched, subsequent `thaw()` calls skip the sync fetch and only refresh in the background. Because nothing has cooled yet on that first call, the default behaviour is to return `ZERO_HASH` and let cooldown build up over subsequent Neovim starts. To get a usable hash immediately, opt into `trust_initial_pin = true`, which records the newest hash upstream is currently pointing at and reuses it until a newer cooled hash is available. `trusted_commit` (per-call) works similarly but pins a specific commit you already verified. Both are opt-in escape hatches from the cooldown; use them at your own discretion.
 
 ## API
 
@@ -61,7 +61,7 @@ local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `cooldown_days` | number | `7` | Days a commit must be known before it is returned. `0` disables cooldown. |
-| `trust_on_first_use` | boolean | `false` | When `true`, performs a synchronous fetch on first use and returns a hash immediately, bypassing the cooldown for that first result. |
+| `trust_initial_pin` | boolean | `false` | When `true`, records the newest hash observed for this (URL, route) as an initial pin on the first thaw call and reuses it as a cooldown-bypass hash until a newer cooled hash is available. |
 | `branch_commits_per_fetch` | number | `500` | Maximum number of branch commits pulled per fetch (`git log -n`). Older commits already recorded in the store keep their original `fetched_at`; a later fetch that reveals commits beyond this window will pick them up over subsequent runs. |
 
 ### `icebox.thaw(url, opts)` / `icebox.thaw(opts)`
@@ -82,9 +82,9 @@ To customize a call, pass an options table as the second argument (or as the fir
 | `clone_path` | string | Absolute path to an existing clone maintained by another tool (e.g. your plugin manager). The upstream URL is read from that clone's `origin` remote, and its objects are reused for `branch` history in place of icebox's own cache. Mutually exclusive with the positional `url` argument and `opts.url`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 | `branch` | string | Newest-first history of that branch, capped at `branch_commits_per_fetch` commits. |
 | `version` | string | All tags in the store whose semver matches the range (`^1.0.0`, `~1.2.3`, `>=2.0.0`, …). Highest match wins among cooled tags. |
-| `trusted_commit` | string | Hash trusted by the user. In the normal path, bypasses the cooldown only when it belongs to the candidate set. See [`doc/icebox.txt`](doc/icebox.txt) for the full resolution rules and empty-store exception. |
+| `trusted_commit` | string | Hash trusted by the user. Bypasses the cooldown only when it belongs to the candidate set. See [`doc/icebox.txt`](doc/icebox.txt) for the full resolution rules. |
 | `cooldown_days` | number | Overrides the `setup()` value for this call. |
-| `trust_on_first_use` | boolean | Overrides the `setup()` value for this call. |
+| `trust_initial_pin` | boolean | Overrides the `setup()` value for this call. |
 | `branch_commits_per_fetch` | number | Overrides the `setup()` value for this call. |
 | `normalize` | function | Custom tag-name normalizer used with `version`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 
@@ -111,22 +111,28 @@ require("lazy").setup(vim.tbl_map(cooldown, {
 ## How it works
 
 ```
-resolve request
+thaw request
       │
-┌─────▼──────────────────┐
-│  local store (JSON)    │
-│  fetched_at per hash   │
-└─────┬──────────────────┘
-      │
-      1. build candidate set from opts (branch history / tags in range / …)
-      2. pick newest cooled commit in the set (fetched_at + cooldown_days <= now)
-      3. if trusted_commit is in the set, return the newer of it and (2)
-      4. else return (2), or ZERO_HASH + schedule BG fetch
+      1. sync fetch when the store file does not exist for this URL
+      2. sync fetch when the store exists but this (branch/version/fallback)
+         route has never been fetched before
+      3. otherwise schedule a background fetch after step 6 returns
+      4. build the candidate set from opts (branch history / tags in range /
+         fallback to tags if any, else the default branch)
+      5. if trust_initial_pin is on and no pin exists yet, record candidates[1]
+         as the initial pin for this (URL, route)
+      6. return the "newest" candidate — smallest index in the array — among:
+         - the newest cooled commit
+         - trusted_commit (when it is in the candidate set)
+         - initial_pin (when trust_initial_pin is on and it is in the set)
+      Falls back to ZERO_HASH when none of the three is in the candidate set.
 ```
 
-The BG fetch step reads from either the cache directory (default) or `clone_path` when the caller supplied one.
+Steps 1 and 2 block on their sync fetch, so a brand-new repository or a
+newly-added route pays a startup cost on that one call. Every later call
+skips the sync fetch and only enqueues the async refresh in step 3.
 
-The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository.
+The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository. Initial pins and the "has this route been fetched" flag live in the same file.
 
 ## License
 

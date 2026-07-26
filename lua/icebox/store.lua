@@ -1,7 +1,6 @@
 local M = {}
 
-local validate = require("icebox.validate")
-local semver   = require("icebox.semver")
+local semver = require("icebox.semver")
 
 -- True on Windows (XDG env vars are rarely set there; use stdpath instead).
 local function is_windows()
@@ -55,80 +54,52 @@ local function mkdir_p(dir)
   vim.fn.mkdir(dir, "p")
 end
 
--- Validate a single store table loaded from JSON. Strips invalid entries in-place.
-local function sanitize(data)
-  if type(data) ~= "table" then return {} end
-
-  -- default_branch
-  if data.default_branch ~= nil then
-    local ok = validate.branch(data.default_branch)
-    if not ok then data.default_branch = nil end
-  end
-
-  -- fetched_at
-  if type(data.fetched_at) ~= "table" then
-    data.fetched_at = {}
-  else
-    local clean = {}
-    for hash, ts in pairs(data.fetched_at) do
-      local ok_h = validate.commit_hash(hash)
-      if ok_h and type(ts) == "number" and ts > 0 and math.floor(ts) == ts then
-        clean[hash] = ts
-      end
-    end
-    data.fetched_at = clean
-  end
-
-  -- branches
-  if type(data.branches) ~= "table" then
-    data.branches = {}
-  else
-    local clean = {}
-    for branch, hashes in pairs(data.branches) do
-      local ok_b = validate.branch(branch)
-      if ok_b and type(hashes) == "table" then
-        local clean_hashes = {}
-        for _, h in ipairs(hashes) do
-          if validate.commit_hash(h) then
-            clean_hashes[#clean_hashes + 1] = h
-          end
-        end
-        clean[branch] = clean_hashes
-      end
-    end
-    data.branches = clean
-  end
-
-  -- tags
-  if type(data.tags) ~= "table" then
-    data.tags = {}
-  else
-    local clean = {}
-    for tag, hash in pairs(data.tags) do
-      if validate.tag(tag) and validate.commit_hash(hash) then
-        clean[tag] = hash
-      end
-    end
-    data.tags = clean
-  end
-
-  return data
+-- Returns true if the store file for `url` already exists on disk.
+-- Used to distinguish "first-ever thaw call for this URL" from "cached data
+-- available"; sync fetch is triggered when the file is absent.
+function M.exists(url)
+  return vim.fn.filereadable(M.path_for(url)) == 1
 end
 
--- Read and return the store table for a URL. Returns a fresh empty table if not found.
+-- Baseline empty store — used when the file does not exist yet.
+local function empty_store()
+  return {
+    fetched_at      = {},
+    branches        = {},
+    tags            = {},
+    initial_pin     = {},
+    initial_fetched = {},
+  }
+end
+
+-- Read the store table for a URL.
+--   - Missing file → empty table (a fresh store).
+--   - JSON parse failure → nil + error message; callers must surface a WARN
+--     and refuse to proceed rather than silently overwriting broken data.
+-- The returned table is trusted as-is: no sanitize pass runs, and downstream
+-- code assumes fields have their expected shapes.
 function M.read(url)
   local path = M.path_for(url)
   local f = io.open(path, "r")
   if not f then
-    return { fetched_at = {}, branches = {}, tags = {} }
+    return empty_store()
   end
   local raw = f:read("*a")
   f:close()
   local ok, data = pcall(vim.json.decode, raw)
-  if not ok or type(data) ~= "table" then
-    return { fetched_at = {}, branches = {}, tags = {} }
+  if not ok then
+    return nil, "store JSON decode failed: " .. tostring(data)
   end
-  return sanitize(data)
+  if type(data) ~= "table" then
+    return nil, "store JSON root is not a table"
+  end
+  -- Ensure the sub-tables exist so callers can index them without guards.
+  data.fetched_at      = data.fetched_at      or {}
+  data.branches        = data.branches        or {}
+  data.tags            = data.tags            or {}
+  data.initial_pin     = data.initial_pin     or {}
+  data.initial_fetched = data.initial_fetched or {}
+  return data
 end
 
 -- Write the store table for a URL atomically.
@@ -165,11 +136,6 @@ function M.write(url, data)
   return true
 end
 
--- Returns true if fetched_at has at least one entry.
-function M.has_records(data)
-  return next(data.fetched_at) ~= nil
-end
-
 -- Returns true if store.tags has at least one semver tag.
 function M.has_semver_tags(data)
   for tag, _ in pairs(data.tags) do
@@ -186,6 +152,8 @@ end
 --   fetched_at      (table hash->ts, additive, no overwrite)
 --   branches        (table name->hashes, full overwrite per branch)
 --   tags            (table name->hash, overwrite on change)
+--   initial_pin     (table pin_key->hash, overwrite per key)
+--   initial_fetched (table pin_key->true, overwrite per key)
 function M.merge(existing, new_data)
   if new_data.default_branch ~= nil then
     existing.default_branch = new_data.default_branch
@@ -211,7 +179,45 @@ function M.merge(existing, new_data)
     end
   end
 
+  if type(new_data.initial_pin) == "table" then
+    existing.initial_pin = existing.initial_pin or {}
+    for pin_key, hash in pairs(new_data.initial_pin) do
+      existing.initial_pin[pin_key] = hash
+    end
+  end
+
+  if type(new_data.initial_fetched) == "table" then
+    existing.initial_fetched = existing.initial_fetched or {}
+    for pin_key, flag in pairs(new_data.initial_fetched) do
+      existing.initial_fetched[pin_key] = flag
+    end
+  end
+
   return existing
+end
+
+-- Return the initial pin hash for a pin_key, or nil when unset.
+function M.get_initial_pin(data, pin_key)
+  return data.initial_pin and data.initial_pin[pin_key]
+end
+
+-- Record an initial pin for a pin_key. Mutates `data` in place. Callers
+-- must persist with M.write to make the change visible across processes.
+function M.set_initial_pin(data, pin_key, hash)
+  data.initial_pin = data.initial_pin or {}
+  data.initial_pin[pin_key] = hash
+end
+
+-- Return whether a pin_key has ever had a successful sync fetch recorded.
+function M.is_initial_fetched(data, pin_key)
+  return (data.initial_fetched and data.initial_fetched[pin_key]) == true
+end
+
+-- Mark a pin_key as having completed its initial sync fetch. Mutates `data`
+-- in place. Callers must persist with M.write.
+function M.mark_initial_fetched(data, pin_key)
+  data.initial_fetched = data.initial_fetched or {}
+  data.initial_fetched[pin_key] = true
 end
 
 -- Try to acquire a lock for a URL. Returns true if acquired.

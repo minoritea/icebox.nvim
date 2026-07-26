@@ -67,25 +67,6 @@ function M.branch(name)
   return true
 end
 
-function M.tag(name)
-  if type(name) ~= "string" then
-    return false, "tag must be a string"
-  end
-  if name:find("\0") or name:find("\n") or name:find("\r") then
-    return false, "tag contains invalid characters"
-  end
-  if name:find("%.%.") then
-    return false, "tag contains '..'"
-  end
-  if name:sub(1, 2) == "--" then
-    return false, "tag must not start with '--'"
-  end
-  if not name:match("^[a-zA-Z0-9%.%-%_/]+$") then
-    return false, "tag contains invalid characters"
-  end
-  return true
-end
-
 -- Validate and expand a clone_path.
 --
 -- A clone_path points to an EXISTING local clone of the upstream repo — one
@@ -187,8 +168,13 @@ function M.opts(opts)
   end
 
   if opts.trust_on_first_use ~= nil then
-    if type(opts.trust_on_first_use) ~= "boolean" then
-      return nil, "opts.trust_on_first_use: must be a boolean"
+    return nil, "opts.trust_on_first_use has been removed. "
+      .. "Use `trust_initial_pin` instead — see :help icebox-thaw-opt-trust-initial-pin"
+  end
+
+  if opts.trust_initial_pin ~= nil then
+    if type(opts.trust_initial_pin) ~= "boolean" then
+      return nil, "opts.trust_initial_pin: must be a boolean"
     end
   end
 

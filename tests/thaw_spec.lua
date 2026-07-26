@@ -27,7 +27,7 @@ do
   config.set({})  -- reset to defaults
   local cfg = config.merge_overrides({})
   h.eq(cfg.cooldown_days, 7,             "default cooldown_days=7")
-  h.eq(cfg.trust_on_first_use, false,    "default trust_on_first_use=false")
+  h.eq(cfg.trust_initial_pin, false,     "default trust_initial_pin=false")
   h.eq(cfg.branch_commits_per_fetch, 500, "default branch_commits_per_fetch=500")
 
   config.set({ cooldown_days = 3 })
@@ -45,21 +45,21 @@ end
 
 h.suite("config.set idempotence")
 do
-  config.set({ cooldown_days = 30, trust_on_first_use = true,
+  config.set({ cooldown_days = 30, trust_initial_pin = true,
                branch_commits_per_fetch = 100 })
   -- Second call with a subset of keys must reset the unspecified keys to
   -- their defaults, not preserve them from the previous call.
-  config.set({ trust_on_first_use = true })
+  config.set({ trust_initial_pin = true })
   local cfg = config.get()
   h.eq(cfg.cooldown_days, 7,              "cooldown_days back to default")
-  h.eq(cfg.trust_on_first_use, true,      "trust_on_first_use retained via opts")
+  h.eq(cfg.trust_initial_pin, true,       "trust_initial_pin retained via opts")
   h.eq(cfg.branch_commits_per_fetch, 500, "branch_commits_per_fetch back to default")
 
   -- Empty opts resets everything to defaults.
   config.set({})
   cfg = config.get()
   h.eq(cfg.cooldown_days, 7,              "empty opts → cooldown_days default")
-  h.eq(cfg.trust_on_first_use, false,     "empty opts → trust_on_first_use default")
+  h.eq(cfg.trust_initial_pin, false,      "empty opts → trust_initial_pin default")
   h.eq(cfg.branch_commits_per_fetch, 500, "empty opts → branch_commits_per_fetch default")
 end
 
@@ -72,7 +72,7 @@ do
   local fresh_config = require("icebox.config")
   local cfg = fresh_config.merge_overrides({})
   h.eq(cfg.cooldown_days, 7,           "cooldown_days defaults to 7")
-  h.eq(cfg.trust_on_first_use, false,  "trust_on_first_use defaults to false")
+  h.eq(cfg.trust_initial_pin, false,   "trust_initial_pin defaults to false")
   h.eq(cfg.branch_commits_per_fetch, 500, "branch_commits_per_fetch defaults to 500")
   package.loaded["icebox"]        = nil
   package.loaded["icebox.config"] = nil
@@ -103,12 +103,13 @@ do
   reset_all()
   -- fixture has 2 commits on main; override caps the fetch to 1.
   -- setup value is deliberately larger (500 default) so the assertion
-  -- exercises "override wins over setup".
+  -- exercises "override wins over setup". cooldown_days=0 is required for
+  -- the initial sync fetch to return a non-zero hash on the very first call.
   icebox.setup({ branch_commits_per_fetch = 500 })
   local got = icebox.thaw(repo_url, {
     branch                   = "main",
     branch_commits_per_fetch = 1,
-    trust_on_first_use       = true,
+    cooldown_days            = 0,
   })
   h.eq(got, HASH2, "override fetch still returns newest commit")
 
@@ -129,9 +130,9 @@ do
   vim.wait(2000, function() return false end, 20)
   reset_all()
 
-  -- Prime a populated store so thaw() takes the resolver + bg_fetch path
-  -- (init.lua step 8) instead of the sync trust_on_first_use path. The
-  -- primed data intentionally contains a fake extra hash so we can observe
+  -- Prime a populated store (and mark it initial_fetched) so thaw() skips
+  -- the initial sync fetch and only exercises the bg_fetch path. The primed
+  -- data intentionally contains a fake extra hash so we can observe
   -- bg_fetch replacing branches.main entirely with the freshly-fetched
   -- (capped) list.
   local FAKE = "ffffffffffffffffffffffffffffffffffffffff"
@@ -139,6 +140,9 @@ do
   data.fetched_at[HASH2] = os.time() - 30 * 86400
   data.fetched_at[FAKE]  = os.time() - 30 * 86400
   data.branches["main"]  = { HASH2, FAKE }
+  -- Pretend we've already sync-fetched this route so thaw() skips step 2
+  -- and dispatches straight to bg_fetch.
+  store.mark_initial_fetched(data, "branch:main")
   store.write(repo_url, data)
 
   icebox.setup({ branch_commits_per_fetch = 500 })
@@ -164,19 +168,25 @@ do
   h.eq(after.branches["main"][1], HASH2, "capped entry is the newest commit")
 end
 
-h.suite("thaw opts override: trust_on_first_use")
+h.suite("trust_on_first_use is retired")
 do
   reset_all()
 
-  icebox.setup({ trust_on_first_use = false })
-  local got = icebox.thaw(repo_url, { branch = "main" })
-  h.eq(got, icebox.ZERO_HASH, "TOFU=false returns zero hash on empty store")
+  -- setup() with the retired key must raise (breaking, but explicit).
+  local ok, err = pcall(icebox.setup, { trust_on_first_use = true })
+  h.is_false(ok, "setup({trust_on_first_use=...}) raises")
+  h.is_true(err and err:find("trust_on_first_use") ~= nil,
+    "error mentions the retired option name")
 
-  reset_all()
-  got = icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
-  h.eq(got, HASH2, "TOFU=true synchronously fetches and returns newest")
+  -- Restore a clean setup for the rest of the suite (last call raised
+  -- before it could store the config).
+  icebox.setup({})
 
-  h.eq(config.get().trust_on_first_use, false, "setup TOFU unchanged")
+  -- thaw() with the retired opt: return ZERO_HASH via the validate error
+  -- path, not by raising.
+  local got = icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
+  h.eq(got, icebox.ZERO_HASH,
+    "thaw({trust_on_first_use=...}) → validate rejects → ZERO_HASH")
 end
 
 h.suite("thaw cache: bare clone persists under XDG_CACHE_HOME")
@@ -185,7 +195,7 @@ do
   local cache_dir = store.cache_dir_for(repo_url)
 
   icebox.setup({})
-  icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
+  icebox.thaw(repo_url, { branch = "main" })
 
   h.is_true(vim.fn.isdirectory(cache_dir) == 1, "cache_dir exists after thaw")
   local r = vim.system({ "git", "-C", cache_dir, "rev-parse", "--git-dir" },
@@ -199,7 +209,7 @@ do
   local cache_dir = store.cache_dir_for(repo_url)
 
   icebox.setup({})
-  icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
+  icebox.thaw(repo_url, { branch = "main" })
 
   -- Assert cache reuse via HEAD inode.
   --
@@ -218,7 +228,7 @@ do
   data.branches   = {}
   store.write(repo_url, data)
 
-  icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
+  icebox.thaw(repo_url, { branch = "main" })
 
   local after = vim.uv.fs_stat(head_path)
   h.not_nil(after, "cache HEAD still exists after second thaw")
@@ -236,7 +246,7 @@ do
   if f then f:write("garbage"); f:close() end
 
   icebox.setup({})
-  local got = icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
+  local got = icebox.thaw(repo_url, { branch = "main", cooldown_days = 0 })
   h.eq(got, HASH2, "broken cache is rebuilt and thaw succeeds")
 end
 
@@ -270,12 +280,11 @@ do
   h.is_nil(vim.uv.fs_stat(fetch_head_path),
     "FETCH_HEAD absent before thaw (fresh clone)")
 
-  icebox.setup({})
+  icebox.setup({ cooldown_days = 0 })
   -- url + clone_path together is a parse error; use the single-table form.
   local got = icebox.thaw({
     clone_path         = clone_path,
     branch             = "main",
-    trust_on_first_use = true,
   })
   h.eq(got, HASH2, "clone_path path returns newest commit")
 
@@ -309,11 +318,10 @@ end
 h.suite("thaw signature: single-table form uses opts.url")
 do
   reset_all()
-  icebox.setup({})
+  icebox.setup({ cooldown_days = 0 })
   local got = icebox.thaw({
     url                = repo_url,
     branch             = "main",
-    trust_on_first_use = true,
   })
   h.eq(got, HASH2, "thaw({url=..., ...}) → single-table form uses opts.url")
 end
@@ -350,10 +358,9 @@ do
   -- path; validate.url + normalize_url should accept it and the sync fetch
   -- path should resolve it through git without a file:// prefix.
   reset_all()
-  icebox.setup({})
+  icebox.setup({ cooldown_days = 0 })
   local got = icebox.thaw(fixture_dir .. "/repo.git", {
     branch             = "main",
-    trust_on_first_use = true,
   })
   h.eq(got, HASH2, "absolute-path URL resolves through the full thaw pipeline")
 end
@@ -379,12 +386,11 @@ do
   vim.system({ "git", "clone", "--quiet", isolated_bare, clone_path },
              { text = true }):wait()
 
-  icebox.setup({})
+  icebox.setup({ cooldown_days = 0 })
   -- Do NOT pass any URL — the origin should supply it
   local got = icebox.thaw({
     clone_path         = clone_path,
     branch             = "main",
-    trust_on_first_use = true,
   })
   h.eq(got, HASH2, "URL resolved from clone_path origin")
 
@@ -407,7 +413,6 @@ do
   icebox.thaw({
     clone_path         = clone_path,
     branch             = "main",
-    trust_on_first_use = true,
   })
 
   -- After a clone_path-based fetch, default_branch must be recorded in the
@@ -438,19 +443,19 @@ do
   vim.system({ "git", "clone", "--quiet", isolated_bare, clone_path },
              { text = true }):wait()
 
-  -- With no branch/tag/version/commit AND an empty store AND TOFU=false,
-  -- thaw() returns ZERO_HASH immediately and schedules an ls-remote probe
-  -- to seed default_branch + tags for the next call.
+  -- Keyless call on an empty store triggers the fallback sync fetch:
+  -- default_branch and tags are populated from the clone_path's origin.
+  -- The returned hash is ZERO_HASH here because every just-fetched tag is
+  -- still uncooled under the default 7-day cooldown.
   icebox.setup({})
   local got = icebox.thaw({ clone_path = clone_path })
   h.eq(got, icebox.ZERO_HASH, "keyless empty-store clone_path returns zero hash")
 
   local git = require("icebox.git")
   local origin = git.origin_url(clone_path)
-  local settled = vim.wait(5000, function()
-    return store.read(origin).default_branch == "main"
-  end, 20)
-  h.is_true(settled, "bg probe seeded default_branch within timeout")
+  local data = store.read(origin)
+  h.eq(data.default_branch, "main",
+    "fallback sync fetch seeded default_branch from clone_path origin")
 
   vim.fn.delete(clone_path,    "rf")
   vim.fn.delete(isolated_bare, "rf")
@@ -592,7 +597,7 @@ do
     "branches remain empty (branch clone skipped when tags exist)")
 end
 
-h.suite("thaw branch bg_fetch: newly added upstream tags are picked up")
+h.suite("thaw keyless bg_fetch: newly added upstream tags are picked up")
 do
   vim.wait(2000, function() return false end, 20)
   reset_all()
@@ -614,15 +619,152 @@ do
   vim.system({ "git", "-C", mutable_bare, "tag", "v3.0.0" },
              { text = true }):wait()
 
-  -- Second thaw call takes the branch route (default_branch cached), so
-  -- fetch_branch_and_tags_async should pick up the new tag as a side effect.
+  -- Second thaw call is still keyless, so initial_fetched for the fallback
+  -- route ("default") is already set → the sync fetch is skipped and
+  -- fetch_default_async runs in the background, re-running ls-remote and
+  -- catching the new tag.
   icebox.thaw(mutable_url)
   local tag_seen = vim.wait(5000, function()
     return store.read(mutable_url).tags["v3.0.0"] ~= nil
   end, 20)
-  h.is_true(tag_seen, "branch bg_fetch surfaced the newly added tag")
+  h.is_true(tag_seen, "keyless bg_fetch surfaced the newly added tag")
 
   vim.fn.delete(mutable_bare, "rf")
+end
+
+-- ─── trust_initial_pin behaviour ────────────────────────────────────────────
+
+h.suite("trust_initial_pin: pin recorded on first thaw when enabled")
+do
+  reset_all()
+  icebox.setup({})
+
+  local got = icebox.thaw(repo_url, {
+    branch             = "main",
+    trust_initial_pin  = true,
+  })
+  -- With cooldown_days=7 (default) all just-fetched commits are uncooled,
+  -- so picker.pick would normally return nil. trust_initial_pin=true records
+  -- candidates[1] (HASH2) as the initial pin and picker returns it as a
+  -- bypass hash.
+  h.eq(got, HASH2, "trust_initial_pin returns candidate[1] on first thaw")
+
+  local data = store.read(repo_url)
+  h.eq(store.get_initial_pin(data, "branch:main"), HASH2,
+    "initial_pin persisted to store")
+end
+
+h.suite("trust_initial_pin: subsequent thaw reuses the recorded pin")
+do
+  reset_all()
+  icebox.setup({})
+
+  -- First thaw: record the pin.
+  icebox.thaw(repo_url, { branch = "main", trust_initial_pin = true })
+
+  -- Wait for any bg fetches to settle so the second call has a stable store.
+  vim.wait(2000, function() return false end, 20)
+
+  -- Second thaw with the same opts: initial_pin already exists, so it is
+  -- reused as a bypass hash even though nothing is cooled yet.
+  local got = icebox.thaw(repo_url, { branch = "main", trust_initial_pin = true })
+  h.eq(got, HASH2, "second thaw returns the same initial_pin")
+end
+
+h.suite("trust_initial_pin=false: pin is not recorded but sync fetch still runs")
+do
+  reset_all()
+  icebox.setup({})
+
+  local got = icebox.thaw(repo_url, { branch = "main" })
+  h.eq(got, icebox.ZERO_HASH,
+    "no bypass hash → uncooled commits produce ZERO_HASH")
+
+  local data = store.read(repo_url)
+  h.is_nil(store.get_initial_pin(data, "branch:main"),
+    "initial_pin not written when trust_initial_pin is off")
+  h.is_true(store.is_initial_fetched(data, "branch:main"),
+    "initial_fetched still marked (sync fetch ran)")
+  h.is_true(#data.branches["main"] >= 1,
+    "branch history populated by the sync fetch")
+end
+
+h.suite("trust_initial_pin: switching branch records a fresh pin under a new key")
+do
+  reset_all()
+  icebox.setup({})
+
+  -- First thaw for branch main.
+  icebox.thaw(repo_url, { branch = "main", trust_initial_pin = true })
+
+  local data = store.read(repo_url)
+  h.eq(store.get_initial_pin(data, "branch:main"), HASH2,
+    "initial_pin for main recorded")
+
+  -- Same URL, different branch → different pin_key → separate sync fetch and
+  -- separate initial_pin entry. The fixture only has main, so a fetch on
+  -- develop will fail; use a version request instead which uses the fetched
+  -- tags to build the candidate set.
+  vim.wait(2000, function() return false end, 20)
+  local got = icebox.thaw(repo_url, {
+    version            = "^1.0.0",
+    trust_initial_pin  = true,
+  })
+  h.is_true(got ~= icebox.ZERO_HASH,
+    "version route returns a candidate via initial_pin")
+
+  local d2 = store.read(repo_url)
+  h.not_nil(store.get_initial_pin(d2, "version:^1.0.0"),
+    "initial_pin under version pin_key recorded independently")
+  h.eq(store.get_initial_pin(d2, "branch:main"), HASH2,
+    "the original branch pin is untouched")
+end
+
+h.suite("trust_initial_pin: no pin recorded when candidates are empty")
+do
+  reset_all()
+  icebox.setup({})
+
+  -- version = "^99.0.0" won't match any fixture tag → candidates empty →
+  -- picker returns nil → thaw returns ZERO_HASH. No pin should be recorded.
+  local got = icebox.thaw(repo_url, {
+    version            = "^99.0.0",
+    trust_initial_pin  = true,
+  })
+  h.eq(got, icebox.ZERO_HASH,
+    "empty candidate set with trust_initial_pin → ZERO_HASH")
+
+  local data = store.read(repo_url)
+  h.is_nil(store.get_initial_pin(data, "version:^99.0.0"),
+    "initial_pin not recorded when candidate set is empty")
+end
+
+h.suite("thaw: trusted_commit is forwarded to picker")
+do
+  reset_all()
+  icebox.setup({ cooldown_days = 7 })
+
+  -- Seed a store with a recent (uncooled) commit on main + mark the route
+  -- as already sync-fetched so thaw() skips step 1/2 and lands directly in
+  -- the resolve pipeline. picker would return nil without trusted_commit
+  -- because HASH2 is not cooled; asserting HASH2 is returned proves the
+  -- opt made it through init.lua to picker.pick.
+  local data = store.read(repo_url)
+  data.fetched_at[HASH2] = os.time() - 3600  -- recent → not cooled
+  data.branches["main"]  = { HASH2 }
+  store.mark_initial_fetched(data, "branch:main")
+  store.write(repo_url, data)
+
+  local got = icebox.thaw(repo_url, {
+    branch         = "main",
+    trusted_commit = HASH2,
+  })
+  h.eq(got, HASH2, "trusted_commit forwarded to picker → returned as bypass")
+
+  -- Sanity check: without trusted_commit the same store yields ZERO_HASH
+  -- because HASH2 is uncooled and no bypass hash is in the candidate set.
+  got = icebox.thaw(repo_url, { branch = "main" })
+  h.eq(got, icebox.ZERO_HASH, "no trusted_commit → cooldown gates the commit")
 end
 
 h.summary()

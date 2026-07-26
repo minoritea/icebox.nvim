@@ -88,12 +88,17 @@ do
   opts, _ = validate.opts({ branch = "main", cooldown_days = 1.5 })
   h.is_nil(opts, "fractional cooldown_days rejected")
 
+  -- Retired option: presence in opts is a validation error regardless of
+  -- the value; the caller must migrate to trust_initial_pin.
   opts, _ = validate.opts({ branch = "main", trust_on_first_use = true })
-  h.not_nil(opts, "trust_on_first_use=true accepted")
-  h.eq(opts and opts.trust_on_first_use, true, "trust_on_first_use preserved")
+  h.is_nil(opts, "trust_on_first_use rejected (retired)")
 
-  opts, _ = validate.opts({ branch = "main", trust_on_first_use = "yes" })
-  h.is_nil(opts, "non-boolean trust_on_first_use rejected")
+  opts, _ = validate.opts({ branch = "main", trust_initial_pin = true })
+  h.not_nil(opts, "trust_initial_pin=true accepted")
+  h.eq(opts and opts.trust_initial_pin, true, "trust_initial_pin preserved")
+
+  opts, _ = validate.opts({ branch = "main", trust_initial_pin = "yes" })
+  h.is_nil(opts, "non-boolean trust_initial_pin rejected")
 
   opts, _ = validate.opts({ branch = "main", branch_commits_per_fetch = 10 })
   h.not_nil(opts, "branch_commits_per_fetch=10 accepted")

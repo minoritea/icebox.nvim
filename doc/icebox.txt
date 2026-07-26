@@ -74,26 +74,38 @@ set, which is the typical case on Windows.
 ==============================================================================
 4. HOW IT WORKS                                        *icebox-how-it-works*
 
-icebox.nvim keeps a store file that records each commit hash it has seen
-along with the time it was first observed. Every |icebox.thaw()| call
-schedules a background job that refreshes this store, so a call returns
-immediately with a commit drawn from whatever the previous run recorded.
+icebox.nvim keeps one JSON store file per repository, recording each commit
+hash it has seen along with the time it was first observed. When
+|icebox.thaw()| is called, icebox picks a commit to return from that store.
 
-The commit is chosen as follows:
+To keep the store useful, |icebox.thaw()| fetches from upstream on demand:
 
-    1. Restrict the candidate commits by the branch/version option:
+    - When the store file does not yet exist (a new repository), a
+      synchronous fetch runs before |icebox.thaw()| returns. Startup blocks
+      briefly on this first call.
+    - When the store exists but the specific route (branch / version /
+      fallback) has not been fetched before, |icebox.thaw()| also runs a
+      synchronous fetch for that route on this call only.
+    - On every other call the fetch runs asynchronously in the background,
+      so |icebox.thaw()| itself returns without waiting.
+
+Once the store is up to date, icebox picks the commit as follows:
+
+    1. Build the candidate set from opts:
        - `branch`  → commits on that branch (newest-first history)
        - `version` → tags whose semver matches the range
-    2. Among those candidates, pick the newest one that has cooled down
-       (`fetched_at + cooldown_days <= now`).
+       - neither   → tags if any semver tag exists, else the default branch
+    2. Return the "newest" hash in that candidate set among:
+       - the newest commit that has cooled down
+         (`fetched_at + cooldown_days <= now`),
+       - `trusted_commit` (when it is in the candidate set), and
+       - the initial pin recorded under `trust_initial_pin` (when set).
+       "Newest" means the smallest index in the candidate array — commit
+       object timestamps are never consulted.
 
-If `trusted_commit` is set, it is returned instead when both of the
-following hold:
-
-    1. `trusted_commit` is among the candidates from step 1.
-    2. `trusted_commit` is newer than the commit picked in step 2.
-
-If no commit qualifies, |icebox.ZERO_HASH| is returned.
+If none of the three sources yield an in-set hash, |icebox.ZERO_HASH| is
+returned. |icebox-thaw-opt-trust-initial-pin| covers how the initial pin is
+recorded and reused.
 
 ==============================================================================
 5. SETUP                                                        *icebox-setup*
@@ -105,8 +117,8 @@ the defaults merged with the fields you supplied.
 
 Example: >lua
   require("icebox").setup({
-    cooldown_days      = 14,
-    trust_on_first_use = false,
+    cooldown_days     = 14,
+    trust_initial_pin = false,
   })
 <
 ==============================================================================
@@ -134,35 +146,30 @@ cooldown_days                                          *icebox-opt-cooldown*
   by |icebox.thaw()|. Set to `0` to disable cooldown entirely (every known
   commit is immediately eligible).
 
-trust_on_first_use                            *icebox-opt-trust-on-first-use*
+trust_initial_pin                              *icebox-opt-trust-initial-pin*
   Type:    boolean
   Default: false
 
-  Controls behaviour on the very first call for a URL (when the local store
-  is empty).
+  When `true`, records the newest hash from the current candidate set as an
+  "initial pin" on the first thaw call for that route, and reuses it as a
+  cooldown-bypass hash on subsequent calls until a newer cooled hash is
+  available.
 
-  false  Return |icebox.ZERO_HASH| and schedule a background fetch. On the
-         next Neovim startup the fetched data will be available and the
-         cooldown clock starts. `trusted_commit`, if supplied, is NOT
-         consulted in this path — the first observation is always withheld.
+  Without this option, a brand-new store returns |icebox.ZERO_HASH| for the
+  first `cooldown_days` after installation because nothing has cooled yet.
+  Enabling `trust_initial_pin` lets |icebox.thaw()| adopt a hash immediately
+  (whatever the upstream is currently pointing at) at the cost of skipping
+  the cooldown protection for that first observation.
 
-  true   Bypass the initial-observation guard once. Specifically:
-           - If `trusted_commit` is set, it is returned as-is (no
-             candidate-set check, since no candidate set exists yet), and
-             a background fetch is scheduled to populate the store.
-           - Otherwise, a synchronous git fetch is performed and the
-             newest matching commit is returned immediately with the
-             cooldown bypassed for that first result only.
-         Subsequent calls (once the store has records) go through the normal
-         cooldown path and `trusted_commit` reverts to its usual
-         candidate-set-scoped semantics — see
-         |icebox-thaw-opt-trusted-commit|.
+  Trade-off: the initial pin is not protected by the cooldown, so an
+  upstream that is already compromised at the moment icebox first observes
+  it will pin that compromised commit. Only enable this option for plugins
+  whose current upstream state you are willing to sign off on manually.
 
-         Trade-off: enabling this leaves the initial-install-day window
-         unprotected. If the upstream is already compromised when icebox
-         first observes it, that state will be adopted immediately. Prefer
-         the default unless you know the upstream is currently in a state
-         you would sign off on manually.
+  The pin is stored per (URL, route) — a subsequent thaw call using the
+  same branch/version pins the same hash, while a different branch or
+  version pins independently. Pins are never removed automatically; edit
+  the store JSON manually to reset a pin.
 
 branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
   Type:    number (integer >= 1)
@@ -271,10 +278,9 @@ normalize                                        *icebox-thaw-opt-normalize*
 trusted_commit                              *icebox-thaw-opt-trusted-commit*
   Type: string (40-char hex)
   Set this to bypass the cooldown for a specific commit hash you have
-  already verified as safe. In the normal (populated-store) path, the
-  bypass applies only when the hash belongs to the candidate set implied
-  by `branch` or `version` — a `trusted_commit` outside that set is
-  ignored.
+  already verified as safe. The bypass applies only when the hash belongs
+  to the candidate set implied by `branch` or `version` — a
+  `trusted_commit` outside that set is ignored.
 
   When both a cooled commit and `trusted_commit` are available in the
   candidate set, the newer of the two is returned. "Newer" is defined
@@ -282,12 +288,6 @@ trusted_commit                              *icebox-thaw-opt-trusted-commit*
     - `branch`  : smaller index in the newest-first history array
     - `version` : higher semver order
   Commit-object timestamps are never consulted.
-
-  Empty-store exception: on the very first call for a URL, no candidate
-  set exists yet. With `trust_on_first_use = false` (default),
-  `trusted_commit` is IGNORED and |icebox.ZERO_HASH| is returned. With
-  `trust_on_first_use = true`, `trusted_commit` is returned as-is
-  without a candidate-set check. See |icebox-opt-trust-on-first-use|.
 
   Example: >lua
     icebox.thaw(url, {
@@ -300,9 +300,9 @@ cooldown_days                                *icebox-thaw-opt-cooldown-days*
   Overrides |icebox-opt-cooldown| for this call only. See there for type,
   default, and semantics.
 
-trust_on_first_use                      *icebox-thaw-opt-trust-on-first-use*
+trust_initial_pin                        *icebox-thaw-opt-trust-initial-pin*
   Type: boolean
-  Overrides |icebox-opt-trust-on-first-use| for this call only. See there
+  Overrides |icebox-opt-trust-initial-pin| for this call only. See there
   for type, default, and semantics.
 
 branch_commits_per_fetch          *icebox-thaw-opt-branch-commits-per-fetch*

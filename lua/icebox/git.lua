@@ -306,10 +306,11 @@ local function merge_new_data(a, b)
   return a
 end
 
--- Probe pipeline used when the caller did not specify branch/version and the
--- store has no cached default_branch. Runs `ls-remote --symref` first; if
--- upstream has no semver tags, falls back to a branch fetch against the
--- discovered default_branch so a single thaw call fully populates the store.
+-- Fallback fetch pipeline used when the caller did not specify branch or
+-- version. Runs `ls-remote --symref` to seed default_branch and tags, then —
+-- when upstream has no semver tags — follows through with a branch fetch
+-- against the discovered default_branch. Callers get a single new_data table
+-- covering whichever route the fallback ends up on.
 local function fetch_default_impl(url, opts, limit)
   local tags_data, tags_err = fetch_tags_impl(url)
   if not tags_data then return nil, tags_err end
@@ -319,7 +320,7 @@ local function fetch_default_impl(url, opts, limit)
   end
 
   -- No semver tags: fall back to a branch fetch against default_branch so the
-  -- first thaw call fully populates the store.
+  -- caller can resolve a branch-route candidate set on the same thaw call.
   local branch = tags_data.default_branch
   if not branch then
     -- ls-remote gave us no symref; keep whatever tag info we managed to grab.
@@ -328,22 +329,6 @@ local function fetch_default_impl(url, opts, limit)
   local branch_data, branch_err = fetch_branch_impl(url, branch, limit, opts)
   if not branch_data then
     return nil, branch_err
-  end
-  return merge_new_data(branch_data, { tags = tags_data.tags })
-end
-
--- Branch fetch pipeline that also refreshes tags via ls-remote in the same
--- pass. This is the bg_fetch path for callers who pinned a branch: once a
--- branch has been chosen, we still want to notice new tags appearing upstream
--- so a future fallback can switch to the version route.
-local function fetch_branch_and_tags_impl(url, branch, limit, opts)
-  local branch_data, branch_err = fetch_branch_impl(url, branch, limit, opts)
-  if not branch_data then return nil, branch_err end
-
-  local tags_data, tags_err = fetch_tags_impl(url)
-  if not tags_data then
-    -- Branch fetch already succeeded; surfacing tags-only failure is enough.
-    return branch_data, tags_err
   end
   return merge_new_data(branch_data, { tags = tags_data.tags })
 end
@@ -387,16 +372,6 @@ end
 function M.fetch_default_async(url, opts, limit, on_done)
   run_async_pipeline(function()
     return fetch_default_impl(url, opts, limit)
-  end, on_done)
-end
-
-function M.fetch_branch_and_tags_sync(url, branch, limit, opts)
-  return fetch_branch_and_tags_impl(url, branch, limit, opts)
-end
-
-function M.fetch_branch_and_tags_async(url, branch, limit, opts, on_done)
-  run_async_pipeline(function()
-    return fetch_branch_and_tags_impl(url, branch, limit, opts)
   end, on_done)
 end
 

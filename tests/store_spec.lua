@@ -60,37 +60,82 @@ do
        "tag added")
 end
 
-h.suite("store sanitize (bad data ignored)")
+h.suite("store.exists")
+do
+  clean()
+  h.is_false(store.exists(TEST_URL), "exists false before write")
+
+  local data = store.read(TEST_URL)
+  data.fetched_at["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 1700000000
+  store.write(TEST_URL, data)
+
+  h.is_true(store.exists(TEST_URL), "exists true after write")
+  clean()
+end
+
+h.suite("store.read: JSON decode failure returns nil + err")
 do
   clean()
   local path = store.path_for(TEST_URL)
   vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
   local f = io.open(path, "w")
-  f:write(vim.json.encode({
-    default_branch = "main",
-    fetched_at = {
-      ["INVALIDHASH"] = 1000,
-      ["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 2000,
-    },
-    branches = { main = { "BADHASH", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" } },
-    tags = {
-      ["v1.0.0"] = "BADHASH",
-      ["../evil"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-      ["v2.0.0"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-    },
-  }))
+  f:write("not-json")
   f:close()
 
-  local data = store.read(TEST_URL)
-  h.is_nil(data.fetched_at["INVALIDHASH"],              "bad hash in fetched_at stripped")
-  h.eq(data.fetched_at["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"], 2000,
-       "valid hash in fetched_at kept")
-  h.eq(#data.branches["main"], 1,                       "bad hash in branch stripped")
-  h.is_nil(data.tags["v1.0.0"],                         "bad hash in tags stripped")
-  h.is_nil(data.tags["../evil"],                        "bad tag name stripped")
-  h.eq(data.tags["v2.0.0"], "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-       "valid tag kept")
+  local data, err = store.read(TEST_URL)
+  h.is_nil(data, "corrupted JSON returns nil")
+  h.is_true(type(err) == "string", "error message returned")
   clean()
+end
+
+h.suite("store.initial_pin helpers")
+do
+  local data = store.read(TEST_URL)
+  h.is_nil(store.get_initial_pin(data, "branch:main"),
+    "get_initial_pin returns nil when unset")
+
+  store.set_initial_pin(data, "branch:main",
+    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
+  h.eq(store.get_initial_pin(data, "branch:main"),
+    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "set_initial_pin persists across get")
+end
+
+h.suite("store.initial_fetched helpers")
+do
+  local data = store.read(TEST_URL)
+  h.is_false(store.is_initial_fetched(data, "branch:main"),
+    "is_initial_fetched false when unset")
+
+  store.mark_initial_fetched(data, "branch:main")
+  h.is_true(store.is_initial_fetched(data, "branch:main"),
+    "mark_initial_fetched flips to true")
+  h.is_false(store.is_initial_fetched(data, "branch:develop"),
+    "unrelated key stays false")
+end
+
+h.suite("store.merge with initial_pin / initial_fetched")
+do
+  local existing = {
+    fetched_at      = {},
+    branches        = {},
+    tags            = {},
+    initial_pin     = { ["branch:main"] = "aa" },
+    initial_fetched = { ["branch:main"] = true },
+  }
+  local new_data = {
+    initial_pin     = { ["branch:main"] = "bb", ["version:^1.0.0"] = "cc" },
+    initial_fetched = { ["default"] = true },
+  }
+  store.merge(existing, new_data)
+  h.eq(existing.initial_pin["branch:main"], "bb",
+    "initial_pin overwritten by new data")
+  h.eq(existing.initial_pin["version:^1.0.0"], "cc",
+    "new initial_pin entry added")
+  h.is_true(existing.initial_fetched["branch:main"],
+    "existing initial_fetched preserved when new data omits key")
+  h.is_true(existing.initial_fetched["default"],
+    "new initial_fetched entry added")
 end
 
 h.suite("store.lock / unlock")
@@ -109,29 +154,24 @@ do
   clean()
 end
 
-h.suite("store.has_records / has_semver_tags")
+h.suite("store.has_semver_tags")
 do
   local empty = { fetched_at = {}, branches = {}, tags = {} }
-  h.is_false(store.has_records(empty),     "empty store has no records")
   h.is_false(store.has_semver_tags(empty), "empty store has no semver tags")
 
-  local with_commit = {
-    fetched_at = { ["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 1000 },
-    branches   = {},
-    tags       = {},
-  }
-  h.is_true(store.has_records(with_commit),     "store with commit hash has records")
-  h.is_false(store.has_semver_tags(with_commit), "store with no tags has no semver tags")
-
-  -- has_records=true but default_branch=nil and no semver tags:
-  -- this is the edge case from B1 where bg_fetch must still fire.
-  local no_branch_no_tags = {
-    fetched_at = { ["a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"] = 1000 },
+  local non_semver = {
+    fetched_at = {},
     branches   = {},
     tags       = { ["not-semver"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" },
   }
-  h.is_true(store.has_records(no_branch_no_tags),     "has_records true without branch")
-  h.is_false(store.has_semver_tags(no_branch_no_tags), "non-semver tag not counted")
+  h.is_false(store.has_semver_tags(non_semver), "non-semver tag not counted")
+
+  local semver_tag = {
+    fetched_at = {},
+    branches   = {},
+    tags       = { ["v1.0.0"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" },
+  }
+  h.is_true(store.has_semver_tags(semver_tag), "semver tag counted")
 end
 
 h.summary()

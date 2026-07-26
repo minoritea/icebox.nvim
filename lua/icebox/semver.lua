@@ -99,14 +99,6 @@ function M.parse_range(s)
   return nil, "cannot parse version range: '" .. s .. "'"
 end
 
--- Returns true if tag_a > tag_b (semver comparison).
-function M.gt(tag_a, tag_b)
-  local a = parse_version(tag_a)
-  local b = parse_version(tag_b)
-  if not a or not b then return false end
-  return cmp(a, b) > 0
-end
-
 -- Compare two normalized version tuples { major, minor, patch [, suffix] }.
 -- Returns -1, 0, or 1. Exposed for callers that already have parsed values
 -- (custom normalizers) so they don't have to round-trip through tag names.

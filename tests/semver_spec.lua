@@ -43,14 +43,6 @@ do
   h.not_nil(err, "invalid range returns error")
 end
 
-h.suite("semver.gt")
-do
-  h.is_true(semver.gt("v1.2.3", "v1.2.2"),  "patch gt")
-  h.is_true(semver.gt("v2.0.0", "v1.9.9"),  "major gt")
-  h.is_false(semver.gt("v1.0.0","v1.0.0"),  "equal not gt")
-  h.is_false(semver.gt("v1.0.0","v1.0.1"),  "less not gt")
-end
-
 h.suite("semver.is_semver_tag")
 do
   h.is_true(semver.is_semver_tag("v1.2.3"),       "v-prefixed")
@@ -84,12 +76,6 @@ do
   h.not_nil(result["v1.2.3-alpha"], "suffix entry present")
   h.not_nil(result["v1.2.3"], "release entry present")
   h.eq(result["v1.2.3-alpha"][4], "alpha", "suffix field")
-end
-
-h.suite("semver.gt: suffix ordering (no-suffix > suffix)")
-do
-  h.is_true(semver.gt("v1.2.3", "v1.2.3-alpha"),  "release > pre-release")
-  h.is_false(semver.gt("v1.2.3-alpha", "v1.2.3"), "pre-release not > release")
 end
 
 h.summary()
