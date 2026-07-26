@@ -1,10 +1,24 @@
 local M = {}
 
-local config   = require("icebox.config")
-local store    = require("icebox.store")
-local git      = require("icebox.git")
-local resolver = require("icebox.resolver")
-local validate = require("icebox.validate")
+local config    = require("icebox.config")
+local store     = require("icebox.store")
+local git       = require("icebox.git")
+local collector = require("icebox.collector")
+local picker    = require("icebox.picker")
+local validate  = require("icebox.validate")
+
+-- Build the candidate set for this thaw call.
+-- Returns a hash array ordered so that the "newer" hash sits at index 1
+-- (branch history: newest commit first / version range: highest semver first).
+-- Empty when neither branch nor version has been resolved yet.
+local function collect_candidates(data, opts)
+  if opts.branch then
+    return collector.from_branch(data, opts.branch)
+  elseif opts.version then
+    return collector.from_version(data, opts.version, opts.normalize)
+  end
+  return {}
+end
 
 -- The zero hash is returned when no cooled commit is available yet.
 M.ZERO_HASH = validate.ZERO_HASH
@@ -222,7 +236,9 @@ function M.thaw(url_or_opts, opts)
 
   -- 7. Main resolve from store
   if store.has_records(data) then
-    local result = resolver.resolve(data, opts, cooldown_sec, now)
+    local candidates = collect_candidates(data, opts)
+    local result = picker.pick(candidates, data.fetched_at,
+                                cooldown_sec, now, opts.trusted_commit)
     vim.schedule(function() bg_fetch(url, opts, cfg) end)
     return result or ZERO_HASH
   end
@@ -262,14 +278,10 @@ function M.thaw(url_or_opts, opts)
   store.write(url, data)
 
   -- Return newest match without cooldown filter (trust_on_first_use path).
-  -- Reuse resolver with cooldown_sec=0 so all fetched entries are eligible.
-  if opts.branch then
-    local result = resolver.resolve_branch(data, opts.branch, 0, math.huge)
-    if result then return result end
-  elseif opts.version then
-    local result = resolver.resolve_version(data, opts.version, 0, math.huge, opts.normalize)
-    if result then return result end
-  end
+  -- Reuse picker with cooldown_sec=0 so all fetched entries are eligible.
+  local candidates = collect_candidates(data, opts)
+  local result = picker.pick(candidates, data.fetched_at, 0, math.huge, nil)
+  if result then return result end
 
   return ZERO_HASH
 end
