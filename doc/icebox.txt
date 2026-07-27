@@ -99,12 +99,12 @@ Once the store is up to date, icebox picks the commit as follows:
        - the newest commit that has cooled down
          (`fetched_at + cooldown_days <= now`),
        - `trusted_commit` (when it is in the candidate set), and
-       - the initial pin recorded under `trust_initial_pin` (when set).
+       - the auto pin recorded under `trust_auto_pin` (when set).
        "Newest" means the smallest index in the candidate array — commit
        object timestamps are never consulted.
 
 If none of the three sources yield an in-set hash, |icebox.ZERO_HASH| is
-returned. |icebox-thaw-opt-trust-initial-pin| covers how the initial pin is
+returned. |icebox-thaw-opt-trust-auto-pin| covers how the auto pin is
 recorded and reused.
 
 ==============================================================================
@@ -118,7 +118,7 @@ the defaults merged with the fields you supplied.
 Example: >lua
   require("icebox").setup({
     cooldown_days     = 14,
-    trust_initial_pin = false,
+    trust_auto_pin = false,
   })
 <
 ==============================================================================
@@ -146,30 +146,30 @@ cooldown_days                                          *icebox-opt-cooldown*
   by |icebox.thaw()|. Set to `0` to disable cooldown entirely (every known
   commit is immediately eligible).
 
-trust_initial_pin                              *icebox-opt-trust-initial-pin*
+trust_auto_pin                                   *icebox-opt-trust-auto-pin*
   Type:    boolean
   Default: false
 
   When `true`, records the newest hash from the current candidate set as an
-  "initial pin" on the first thaw call for that route, and reuses it as a
+  "auto pin" on the first thaw call for that route, and reuses it as a
   cooldown-bypass hash on subsequent calls until a newer cooled hash is
   available.
 
   Without this option, a brand-new store returns |icebox.ZERO_HASH| for the
   first `cooldown_days` after installation because nothing has cooled yet.
-  Enabling `trust_initial_pin` lets |icebox.thaw()| adopt a hash immediately
+  Enabling `trust_auto_pin` lets |icebox.thaw()| adopt a hash immediately
   (whatever the upstream is currently pointing at) at the cost of skipping
   the cooldown protection for that first observation.
 
-  Trade-off: the initial pin is not protected by the cooldown, so an
+  Trade-off: the auto pin is not protected by the cooldown, so an
   upstream that is already compromised at the moment icebox first observes
   it will pin that compromised commit. Only enable this option for plugins
   whose current upstream state you are willing to sign off on manually.
 
-  The pin is stored per (URL, route) — a subsequent thaw call using the
-  same branch/version pins the same hash, while a different branch or
-  version pins independently. Pins are never removed automatically; edit
-  the store JSON manually to reset a pin.
+  The pin is stored per (URL, route). It is written exactly once — on
+  the first thaw call where `trust_auto_pin` is on and the store has no
+  pin for that (URL, route) yet — and is not overwritten by later thaw
+  calls. A different branch or version pins independently.
 
 branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
   Type:    number (integer >= 1)
@@ -300,9 +300,9 @@ cooldown_days                                *icebox-thaw-opt-cooldown-days*
   Overrides |icebox-opt-cooldown| for this call only. See there for type,
   default, and semantics.
 
-trust_initial_pin                        *icebox-thaw-opt-trust-initial-pin*
+trust_auto_pin                              *icebox-thaw-opt-trust-auto-pin*
   Type: boolean
-  Overrides |icebox-opt-trust-initial-pin| for this call only. See there
+  Overrides |icebox-opt-trust-auto-pin| for this call only. See there
   for type, default, and semantics.
 
 branch_commits_per_fetch          *icebox-thaw-opt-branch-commits-per-fetch*

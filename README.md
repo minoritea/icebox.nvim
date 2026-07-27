@@ -46,13 +46,13 @@ local icebox = require("icebox")
 
 icebox.setup({
   cooldown_days     = 7,
-  trust_initial_pin = true,  -- opt-in; see the note below
+  trust_auto_pin = true,  -- opt-in; see the note below
 })
 
 local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand it to your plugin manager
 ```
 
-**Note.** `thaw()` runs a synchronous fetch — and blocks briefly on that one call — the first time it sees a given (repository, route) pair, where a "route" is `branch = <name>`, `version = <range>`, or the fallback used when neither is specified. Adding a new plugin, switching a plugin from `branch` to `version`, or renaming the pinned branch all trip a fresh sync fetch. Once the route has been fetched, subsequent `thaw()` calls skip the sync fetch and only refresh in the background. Because nothing has cooled yet on that first call, the default behaviour is to return `ZERO_HASH` and let cooldown build up over subsequent Neovim starts. To get a usable hash immediately, opt into `trust_initial_pin = true`, which records the newest hash upstream is currently pointing at and reuses it until a newer cooled hash is available. `trusted_commit` (per-call) works similarly but pins a specific commit you already verified. Both are opt-in escape hatches from the cooldown; use them at your own discretion.
+**Note.** `thaw()` runs a synchronous fetch — and blocks briefly on that one call — the first time it sees a given (repository, route) pair, where a "route" is `branch = <name>`, `version = <range>`, or the fallback used when neither is specified. Adding a new plugin, switching a plugin from `branch` to `version`, or renaming the pinned branch all trip a fresh sync fetch. Once the route has been fetched, subsequent `thaw()` calls skip the sync fetch and only refresh in the background. Because nothing has cooled yet on that first call, the default behaviour is to return `ZERO_HASH` and let cooldown build up over subsequent Neovim starts. To get a usable hash immediately, opt into `trust_auto_pin = true`, which records the newest hash upstream is currently pointing at as an auto pin — written exactly once per (URL, route) and never overwritten by later thaws — and reuses it until a newer cooled hash is available. `trusted_commit` (per-call) works similarly but pins a specific commit you already verified. Both are opt-in escape hatches from the cooldown; use them at your own discretion.
 
 ## API
 
@@ -61,7 +61,7 @@ local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `cooldown_days` | number | `7` | Days a commit must be known before it is returned. `0` disables cooldown. |
-| `trust_initial_pin` | boolean | `false` | When `true`, records the newest hash observed for this (URL, route) as an initial pin on the first thaw call and reuses it as a cooldown-bypass hash until a newer cooled hash is available. |
+| `trust_auto_pin` | boolean | `false` | When `true`, records the newest hash observed for this (URL, route) as an auto pin on the first thaw call and reuses it as a cooldown-bypass hash until a newer cooled hash is available. The pin is written exactly once per (URL, route) and never overwritten by later thaws. |
 | `branch_commits_per_fetch` | number | `500` | Maximum number of branch commits pulled per fetch (`git log -n`). Older commits already recorded in the store keep their original `fetched_at`; a later fetch that reveals commits beyond this window will pick them up over subsequent runs. |
 
 ### `icebox.thaw(url, opts)` / `icebox.thaw(opts)`
@@ -84,7 +84,7 @@ To customize a call, pass an options table as the second argument (or as the fir
 | `version` | string | All tags in the store whose semver matches the range (`^1.0.0`, `~1.2.3`, `>=2.0.0`, …). Highest match wins among cooled tags. |
 | `trusted_commit` | string | Hash trusted by the user. Bypasses the cooldown only when it belongs to the candidate set. See [`doc/icebox.txt`](doc/icebox.txt) for the full resolution rules. |
 | `cooldown_days` | number | Overrides the `setup()` value for this call. |
-| `trust_initial_pin` | boolean | Overrides the `setup()` value for this call. |
+| `trust_auto_pin` | boolean | Overrides the `setup()` value for this call. |
 | `branch_commits_per_fetch` | number | Overrides the `setup()` value for this call. |
 | `normalize` | function | Custom tag-name normalizer used with `version`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 
@@ -119,12 +119,12 @@ thaw request
       3. otherwise schedule a background fetch after step 6 returns
       4. build the candidate set from opts (branch history / tags in range /
          fallback to tags if any, else the default branch)
-      5. if trust_initial_pin is on and no pin exists yet, record candidates[1]
-         as the initial pin for this (URL, route)
+      5. if trust_auto_pin is on and no pin exists yet, record candidates[1]
+         as the auto pin for this (URL, route)
       6. return the "newest" candidate — smallest index in the array — among:
          - the newest cooled commit
          - trusted_commit (when it is in the candidate set)
-         - initial_pin (when trust_initial_pin is on and it is in the set)
+         - auto_pin (when trust_auto_pin is on and it is in the set)
       Falls back to ZERO_HASH when none of the three is in the candidate set.
 ```
 

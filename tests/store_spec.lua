@@ -88,17 +88,17 @@ do
   clean()
 end
 
-h.suite("store.initial_pin helpers")
+h.suite("store.auto_pin helpers")
 do
   local data = store.read(TEST_URL)
-  h.is_nil(store.get_initial_pin(data, "branch:main"),
-    "get_initial_pin returns nil when unset")
+  h.is_nil(store.get_auto_pin(data, "branch:main"),
+    "get_auto_pin returns nil when unset")
 
-  store.set_initial_pin(data, "branch:main",
+  store.set_auto_pin(data, "branch:main",
     "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
-  h.eq(store.get_initial_pin(data, "branch:main"),
+  h.eq(store.get_auto_pin(data, "branch:main"),
     "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-    "set_initial_pin persists across get")
+    "set_auto_pin persists across get")
 end
 
 h.suite("store.initial_fetched helpers")
@@ -114,24 +114,24 @@ do
     "unrelated key stays false")
 end
 
-h.suite("store.merge with initial_pin / initial_fetched")
+h.suite("store.merge with auto_pin / initial_fetched")
 do
   local existing = {
     fetched_at      = {},
     branches        = {},
     tags            = {},
-    initial_pin     = { ["branch:main"] = "aa" },
+    auto_pin     = { ["branch:main"] = "aa" },
     initial_fetched = { ["branch:main"] = true },
   }
   local new_data = {
-    initial_pin     = { ["branch:main"] = "bb", ["version:^1.0.0"] = "cc" },
+    auto_pin     = { ["branch:main"] = "bb", ["version:^1.0.0"] = "cc" },
     initial_fetched = { ["default"] = true },
   }
   store.merge(existing, new_data)
-  h.eq(existing.initial_pin["branch:main"], "bb",
-    "initial_pin overwritten by new data")
-  h.eq(existing.initial_pin["version:^1.0.0"], "cc",
-    "new initial_pin entry added")
+  h.eq(existing.auto_pin["branch:main"], "bb",
+    "auto_pin overwritten by new data")
+  h.eq(existing.auto_pin["version:^1.0.0"], "cc",
+    "new auto_pin entry added")
   h.is_true(existing.initial_fetched["branch:main"],
     "existing initial_fetched preserved when new data omits key")
   h.is_true(existing.initial_fetched["default"],

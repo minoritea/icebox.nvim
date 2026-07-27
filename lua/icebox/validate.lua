@@ -167,14 +167,9 @@ function M.opts(opts)
     end
   end
 
-  if opts.trust_on_first_use ~= nil then
-    return nil, "opts.trust_on_first_use has been removed. "
-      .. "Use `trust_initial_pin` instead — see :help icebox-thaw-opt-trust-initial-pin"
-  end
-
-  if opts.trust_initial_pin ~= nil then
-    if type(opts.trust_initial_pin) ~= "boolean" then
-      return nil, "opts.trust_initial_pin: must be a boolean"
+  if opts.trust_auto_pin ~= nil then
+    if type(opts.trust_auto_pin) ~= "boolean" then
+      return nil, "opts.trust_auto_pin: must be a boolean"
     end
   end
 

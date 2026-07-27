@@ -2,6 +2,7 @@ local M = {}
 
 local validate = require("icebox.validate")
 local semver   = require("icebox.semver")
+local store    = require("icebox.store")
 
 local CLONE_SAFETY_ARGS = {
   "--no-local",
@@ -333,46 +334,91 @@ local function fetch_default_impl(url, opts, limit)
   return merge_new_data(branch_data, { tags = tags_data.tags })
 end
 
--- ─── Sync/async wrappers ────────────────────────────────────────────────────
+-- ─── Public: fetch + persist ────────────────────────────────────────────────
 --
--- Sync entry points invoke the pipeline directly (no coroutine → run_cmd
--- takes the :wait() branch). Async entry points wrap the pipeline in a
--- coroutine and deliver the return values via callback.
+-- Each fetch function acquires the URL's cross-process lock, runs the
+-- network pipeline, merges the result into the store, and releases the
+-- lock. Sync variants return `true` on success or `nil + err`. Async
+-- variants are fire-and-forget and surface errors via vim.notify.
 
-local function run_async_pipeline(pipeline_fn, on_done)
+local function warn(msg)
+  vim.notify("[icebox] " .. msg, vim.log.levels.WARN)
+end
+
+-- Run pipeline_fn under the URL lock; merge its `new_data` into the store.
+-- Returns `true` on success or `nil + err` on failure. Never raises.
+local function fetch_and_persist(url, pipeline_fn)
+  if not store.lock(url) then
+    return nil, "URL locked by another process"
+  end
+
+  local new_data, err = pipeline_fn()
+  if not new_data then
+    store.unlock(url)
+    return nil, err or "unknown fetch error"
+  end
+
+  local data, read_err = store.read(url)
+  if not data then
+    store.unlock(url)
+    return nil, read_err or "store read failed"
+  end
+
+  store.merge(data, new_data)
+
+  local ok, write_err = store.write(url, data)
+  store.unlock(url)
+  if not ok then
+    return nil, write_err or "store write failed"
+  end
+  return true
+end
+
+-- Wrap a sync fetch in a coroutine so its blocking git calls yield back to
+-- the loop. Fire-and-forget: failures are surfaced via WARN.
+local function run_async(url, pipeline_fn)
   coroutine.wrap(function()
-    on_done(pipeline_fn())
+    local ok, err = fetch_and_persist(url, pipeline_fn)
+    if not ok then
+      warn("bg fetch failed for " .. url .. ": " .. (err or "unknown"))
+    end
   end)()
 end
 
-function M.fetch_branch_sync(url, branch, limit, opts)
-  return fetch_branch_impl(url, branch, limit, opts)
+function M.fetch_branch_sync(url, branch, limit, fetch_target)
+  return fetch_and_persist(url, function()
+    return fetch_branch_impl(url, branch, limit, fetch_target)
+  end)
 end
 
-function M.fetch_branch_async(url, branch, limit, opts, on_done)
-  run_async_pipeline(function()
-    return fetch_branch_impl(url, branch, limit, opts)
-  end, on_done)
+function M.fetch_branch_async(url, branch, limit, fetch_target)
+  run_async(url, function()
+    return fetch_branch_impl(url, branch, limit, fetch_target)
+  end)
 end
 
 function M.fetch_tags_sync(url)
-  return fetch_tags_impl(url)
-end
-
-function M.fetch_tags_async(url, on_done)
-  run_async_pipeline(function()
+  return fetch_and_persist(url, function()
     return fetch_tags_impl(url)
-  end, on_done)
+  end)
 end
 
-function M.fetch_default_sync(url, opts, limit)
-  return fetch_default_impl(url, opts, limit)
+function M.fetch_tags_async(url)
+  run_async(url, function()
+    return fetch_tags_impl(url)
+  end)
 end
 
-function M.fetch_default_async(url, opts, limit, on_done)
-  run_async_pipeline(function()
-    return fetch_default_impl(url, opts, limit)
-  end, on_done)
+function M.fetch_default_sync(url, limit, fetch_target)
+  return fetch_and_persist(url, function()
+    return fetch_default_impl(url, fetch_target, limit)
+  end)
+end
+
+function M.fetch_default_async(url, limit, fetch_target)
+  run_async(url, function()
+    return fetch_default_impl(url, fetch_target, limit)
+  end)
 end
 
 return M

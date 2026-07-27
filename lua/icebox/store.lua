@@ -67,7 +67,7 @@ local function empty_store()
     fetched_at      = {},
     branches        = {},
     tags            = {},
-    initial_pin     = {},
+    auto_pin        = {},
     initial_fetched = {},
   }
 end
@@ -97,7 +97,7 @@ function M.read(url)
   data.fetched_at      = data.fetched_at      or {}
   data.branches        = data.branches        or {}
   data.tags            = data.tags            or {}
-  data.initial_pin     = data.initial_pin     or {}
+  data.auto_pin        = data.auto_pin        or {}
   data.initial_fetched = data.initial_fetched or {}
   return data
 end
@@ -152,7 +152,7 @@ end
 --   fetched_at      (table hash->ts, additive, no overwrite)
 --   branches        (table name->hashes, full overwrite per branch)
 --   tags            (table name->hash, overwrite on change)
---   initial_pin     (table pin_key->hash, overwrite per key)
+--   auto_pin        (table pin_key->hash, overwrite per key)
 --   initial_fetched (table pin_key->true, overwrite per key)
 function M.merge(existing, new_data)
   if new_data.default_branch ~= nil then
@@ -179,10 +179,10 @@ function M.merge(existing, new_data)
     end
   end
 
-  if type(new_data.initial_pin) == "table" then
-    existing.initial_pin = existing.initial_pin or {}
-    for pin_key, hash in pairs(new_data.initial_pin) do
-      existing.initial_pin[pin_key] = hash
+  if type(new_data.auto_pin) == "table" then
+    existing.auto_pin = existing.auto_pin or {}
+    for pin_key, hash in pairs(new_data.auto_pin) do
+      existing.auto_pin[pin_key] = hash
     end
   end
 
@@ -196,16 +196,16 @@ function M.merge(existing, new_data)
   return existing
 end
 
--- Return the initial pin hash for a pin_key, or nil when unset.
-function M.get_initial_pin(data, pin_key)
-  return data.initial_pin and data.initial_pin[pin_key]
+-- Return the auto pin hash for a pin_key, or nil when unset.
+function M.get_auto_pin(data, pin_key)
+  return data.auto_pin and data.auto_pin[pin_key]
 end
 
--- Record an initial pin for a pin_key. Mutates `data` in place. Callers
+-- Record an auto pin for a pin_key. Mutates `data` in place. Callers
 -- must persist with M.write to make the change visible across processes.
-function M.set_initial_pin(data, pin_key, hash)
-  data.initial_pin = data.initial_pin or {}
-  data.initial_pin[pin_key] = hash
+function M.set_auto_pin(data, pin_key, hash)
+  data.auto_pin = data.auto_pin or {}
+  data.auto_pin[pin_key] = hash
 end
 
 -- Return whether a pin_key has ever had a successful sync fetch recorded.

@@ -27,7 +27,7 @@ do
   config.set({})  -- reset to defaults
   local cfg = config.merge_overrides({})
   h.eq(cfg.cooldown_days, 7,             "default cooldown_days=7")
-  h.eq(cfg.trust_initial_pin, false,     "default trust_initial_pin=false")
+  h.eq(cfg.trust_auto_pin, false,     "default trust_auto_pin=false")
   h.eq(cfg.branch_commits_per_fetch, 500, "default branch_commits_per_fetch=500")
 
   config.set({ cooldown_days = 3 })
@@ -45,21 +45,21 @@ end
 
 h.suite("config.set idempotence")
 do
-  config.set({ cooldown_days = 30, trust_initial_pin = true,
+  config.set({ cooldown_days = 30, trust_auto_pin = true,
                branch_commits_per_fetch = 100 })
   -- Second call with a subset of keys must reset the unspecified keys to
   -- their defaults, not preserve them from the previous call.
-  config.set({ trust_initial_pin = true })
+  config.set({ trust_auto_pin = true })
   local cfg = config.get()
   h.eq(cfg.cooldown_days, 7,              "cooldown_days back to default")
-  h.eq(cfg.trust_initial_pin, true,       "trust_initial_pin retained via opts")
+  h.eq(cfg.trust_auto_pin, true,       "trust_auto_pin retained via opts")
   h.eq(cfg.branch_commits_per_fetch, 500, "branch_commits_per_fetch back to default")
 
   -- Empty opts resets everything to defaults.
   config.set({})
   cfg = config.get()
   h.eq(cfg.cooldown_days, 7,              "empty opts → cooldown_days default")
-  h.eq(cfg.trust_initial_pin, false,      "empty opts → trust_initial_pin default")
+  h.eq(cfg.trust_auto_pin, false,      "empty opts → trust_auto_pin default")
   h.eq(cfg.branch_commits_per_fetch, 500, "empty opts → branch_commits_per_fetch default")
 end
 
@@ -72,7 +72,7 @@ do
   local fresh_config = require("icebox.config")
   local cfg = fresh_config.merge_overrides({})
   h.eq(cfg.cooldown_days, 7,           "cooldown_days defaults to 7")
-  h.eq(cfg.trust_initial_pin, false,   "trust_initial_pin defaults to false")
+  h.eq(cfg.trust_auto_pin, false,   "trust_auto_pin defaults to false")
   h.eq(cfg.branch_commits_per_fetch, 500, "branch_commits_per_fetch defaults to 500")
   package.loaded["icebox"]        = nil
   package.loaded["icebox.config"] = nil
@@ -168,11 +168,11 @@ do
   h.eq(after.branches["main"][1], HASH2, "capped entry is the newest commit")
 end
 
-h.suite("trust_on_first_use is retired")
+h.suite("trust_on_first_use is retired in setup")
 do
   reset_all()
 
-  -- setup() with the retired key must raise (breaking, but explicit).
+  -- setup() with the retired key raises so users are forced to migrate.
   local ok, err = pcall(icebox.setup, { trust_on_first_use = true })
   h.is_false(ok, "setup({trust_on_first_use=...}) raises")
   h.is_true(err and err:find("trust_on_first_use") ~= nil,
@@ -181,12 +181,6 @@ do
   -- Restore a clean setup for the rest of the suite (last call raised
   -- before it could store the config).
   icebox.setup({})
-
-  -- thaw() with the retired opt: return ZERO_HASH via the validate error
-  -- path, not by raising.
-  local got = icebox.thaw(repo_url, { branch = "main", trust_on_first_use = true })
-  h.eq(got, icebox.ZERO_HASH,
-    "thaw({trust_on_first_use=...}) → validate rejects → ZERO_HASH")
 end
 
 h.suite("thaw cache: bare clone persists under XDG_CACHE_HOME")
@@ -632,46 +626,46 @@ do
   vim.fn.delete(mutable_bare, "rf")
 end
 
--- ─── trust_initial_pin behaviour ────────────────────────────────────────────
+-- ─── trust_auto_pin behaviour ────────────────────────────────────────────
 
-h.suite("trust_initial_pin: pin recorded on first thaw when enabled")
+h.suite("trust_auto_pin: pin recorded on first thaw when enabled")
 do
   reset_all()
   icebox.setup({})
 
   local got = icebox.thaw(repo_url, {
     branch             = "main",
-    trust_initial_pin  = true,
+    trust_auto_pin  = true,
   })
   -- With cooldown_days=7 (default) all just-fetched commits are uncooled,
-  -- so picker.pick would normally return nil. trust_initial_pin=true records
+  -- so picker.pick would normally return nil. trust_auto_pin=true records
   -- candidates[1] (HASH2) as the initial pin and picker returns it as a
   -- bypass hash.
-  h.eq(got, HASH2, "trust_initial_pin returns candidate[1] on first thaw")
+  h.eq(got, HASH2, "trust_auto_pin returns candidate[1] on first thaw")
 
   local data = store.read(repo_url)
-  h.eq(store.get_initial_pin(data, "branch:main"), HASH2,
+  h.eq(store.get_auto_pin(data, "branch:main"), HASH2,
     "initial_pin persisted to store")
 end
 
-h.suite("trust_initial_pin: subsequent thaw reuses the recorded pin")
+h.suite("trust_auto_pin: subsequent thaw reuses the recorded pin")
 do
   reset_all()
   icebox.setup({})
 
   -- First thaw: record the pin.
-  icebox.thaw(repo_url, { branch = "main", trust_initial_pin = true })
+  icebox.thaw(repo_url, { branch = "main", trust_auto_pin = true })
 
   -- Wait for any bg fetches to settle so the second call has a stable store.
   vim.wait(2000, function() return false end, 20)
 
   -- Second thaw with the same opts: initial_pin already exists, so it is
   -- reused as a bypass hash even though nothing is cooled yet.
-  local got = icebox.thaw(repo_url, { branch = "main", trust_initial_pin = true })
+  local got = icebox.thaw(repo_url, { branch = "main", trust_auto_pin = true })
   h.eq(got, HASH2, "second thaw returns the same initial_pin")
 end
 
-h.suite("trust_initial_pin=false: pin is not recorded but sync fetch still runs")
+h.suite("trust_auto_pin=false: pin is not recorded but sync fetch still runs")
 do
   reset_all()
   icebox.setup({})
@@ -681,24 +675,24 @@ do
     "no bypass hash → uncooled commits produce ZERO_HASH")
 
   local data = store.read(repo_url)
-  h.is_nil(store.get_initial_pin(data, "branch:main"),
-    "initial_pin not written when trust_initial_pin is off")
+  h.is_nil(store.get_auto_pin(data, "branch:main"),
+    "initial_pin not written when trust_auto_pin is off")
   h.is_true(store.is_initial_fetched(data, "branch:main"),
     "initial_fetched still marked (sync fetch ran)")
   h.is_true(#data.branches["main"] >= 1,
     "branch history populated by the sync fetch")
 end
 
-h.suite("trust_initial_pin: switching branch records a fresh pin under a new key")
+h.suite("trust_auto_pin: switching branch records a fresh pin under a new key")
 do
   reset_all()
   icebox.setup({})
 
   -- First thaw for branch main.
-  icebox.thaw(repo_url, { branch = "main", trust_initial_pin = true })
+  icebox.thaw(repo_url, { branch = "main", trust_auto_pin = true })
 
   local data = store.read(repo_url)
-  h.eq(store.get_initial_pin(data, "branch:main"), HASH2,
+  h.eq(store.get_auto_pin(data, "branch:main"), HASH2,
     "initial_pin for main recorded")
 
   -- Same URL, different branch → different pin_key → separate sync fetch and
@@ -708,19 +702,19 @@ do
   vim.wait(2000, function() return false end, 20)
   local got = icebox.thaw(repo_url, {
     version            = "^1.0.0",
-    trust_initial_pin  = true,
+    trust_auto_pin  = true,
   })
   h.is_true(got ~= icebox.ZERO_HASH,
     "version route returns a candidate via initial_pin")
 
   local d2 = store.read(repo_url)
-  h.not_nil(store.get_initial_pin(d2, "version:^1.0.0"),
+  h.not_nil(store.get_auto_pin(d2, "version:^1.0.0"),
     "initial_pin under version pin_key recorded independently")
-  h.eq(store.get_initial_pin(d2, "branch:main"), HASH2,
+  h.eq(store.get_auto_pin(d2, "branch:main"), HASH2,
     "the original branch pin is untouched")
 end
 
-h.suite("trust_initial_pin: no pin recorded when candidates are empty")
+h.suite("trust_auto_pin: no pin recorded when candidates are empty")
 do
   reset_all()
   icebox.setup({})
@@ -729,13 +723,13 @@ do
   -- picker returns nil → thaw returns ZERO_HASH. No pin should be recorded.
   local got = icebox.thaw(repo_url, {
     version            = "^99.0.0",
-    trust_initial_pin  = true,
+    trust_auto_pin  = true,
   })
   h.eq(got, icebox.ZERO_HASH,
-    "empty candidate set with trust_initial_pin → ZERO_HASH")
+    "empty candidate set with trust_auto_pin → ZERO_HASH")
 
   local data = store.read(repo_url)
-  h.is_nil(store.get_initial_pin(data, "version:^99.0.0"),
+  h.is_nil(store.get_auto_pin(data, "version:^99.0.0"),
     "initial_pin not recorded when candidate set is empty")
 end
 
@@ -765,6 +759,75 @@ do
   -- because HASH2 is uncooled and no bypass hash is in the candidate set.
   got = icebox.thaw(repo_url, { branch = "main" })
   h.eq(got, icebox.ZERO_HASH, "no trusted_commit → cooldown gates the commit")
+end
+
+h.suite("thaw: keyless fallback also marks the resolved route as fetched")
+do
+  -- After the keyless sync fetch resolves to a concrete route (branch or
+  -- version), initial_fetched must be set for both the fallback identifier
+  -- ("default") AND the resolved route's pin key. Without this, a second
+  -- thaw() that explicitly names the resolved branch/version would fire a
+  -- redundant sync fetch on the same underlying data.
+  vim.wait(2000, function() return false end, 20)
+  reset_all()
+
+  icebox.setup({})
+  icebox.thaw(repo_url)  -- keyless: takes the fallback sync path
+
+  local data = store.read(repo_url)
+  h.is_true(store.is_initial_fetched(data, "default"),
+    "'default' marker set after the fallback sync fetch")
+  -- fixture repo has semver tags, so the fallback resolves to the version
+  -- route with pin_key "version:>=0.0.0".
+  h.is_true(store.is_initial_fetched(data, "version:>=0.0.0"),
+    "version:>=0.0.0 marker set — a follow-up version thaw skips step 2")
+end
+
+h.suite("thaw: step 5 store.write failure returns ZERO_HASH + WARN")
+do
+  -- Step 5 records the auto pin and persists it. When store.write fails
+  -- there, the current contract is: WARN + return ZERO_HASH from thaw().
+  -- Monkey-patch store.write to force the failure and confirm the branch
+  -- is reachable.
+  reset_all()
+
+  local store_mod = require("icebox.store")
+
+  -- Prime the store so steps 1/2 are skipped: store.exists() = true,
+  -- is_initial_fetched(..., "branch:main") = true, and main has one commit.
+  do
+    local data = store_mod.read(repo_url)
+    data.fetched_at[HASH2] = os.time() - 3600  -- recent → not cooled
+    data.branches["main"]  = { HASH2 }
+    store_mod.mark_initial_fetched(data, "branch:main")
+    store_mod.write(repo_url, data)
+  end
+
+  local original_write = store_mod.write
+  local blocked_write_calls = 0
+  store_mod.write = function(url, data)
+    -- Only intercept step-5's write. Every prior write in this suite has
+    -- already happened via `original_write` above, so any write we see
+    -- here has to be the auto-pin persist.
+    blocked_write_calls = blocked_write_calls + 1
+    return false, "simulated write failure"
+  end
+
+  icebox.setup({ trust_auto_pin = true })
+  local got = icebox.thaw(repo_url, { branch = "main" })
+
+  store_mod.write = original_write
+
+  h.eq(got, icebox.ZERO_HASH,
+    "thaw returns ZERO_HASH when step 5's store.write fails")
+  h.is_true(blocked_write_calls >= 1,
+    "step 5 attempted at least one store.write")
+
+  -- Sanity: the store's auto_pin entry was never persisted (the write
+  -- was blocked). It stays absent so the next thaw call retries the pin.
+  local data = store_mod.read(repo_url)
+  h.is_nil(store_mod.get_auto_pin(data, "branch:main"),
+    "auto_pin not persisted after write failure")
 end
 
 h.summary()
