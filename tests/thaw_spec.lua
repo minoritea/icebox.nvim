@@ -20,6 +20,25 @@ local function reset_all()
   vim.fn.delete(xdg_cache             .. "/icebox.nvim", "rf")
 end
 
+-- Test helpers around the store handle API. Open, apply the mutator (if
+-- any) or grab the snapshot, then close. Wrappers keep the test bodies
+-- readable when they don't care about the handle lifecycle.
+local function read_store(url)
+  local handle, err = store.open(url)
+  if not handle then return nil, err end
+  local snapshot = vim.deepcopy(handle.data)
+  store.close(handle)
+  return snapshot
+end
+
+local function mutate_store(url, mutator)
+  local handle, err = store.open(url)
+  if not handle then error("store.open failed: " .. tostring(err)) end
+  mutator(handle.data)
+  local ok, close_err = store.close(handle)
+  if not ok then error("store.close failed: " .. tostring(close_err)) end
+end
+
 reset_all()
 
 h.suite("config.merge_overrides")
@@ -83,10 +102,12 @@ h.suite("thaw opts override: cooldown_days")
 do
   reset_all()
   -- Prime the store with fetched_at from 3 days ago
-  local data = store.read(repo_url)
-  data.fetched_at[HASH2] = os.time() - 3 * 86400
-  data.branches["main"]  = { HASH2 }
-  store.write(repo_url, data)
+  mutate_store(repo_url, function(data)
+    data.fetched_at[HASH2] = os.time() - 3 * 86400
+    data.branches["main"]  = { HASH2 }
+    -- Skip step 1/2 in thaw so we exercise the resolver against the primed data.
+    store.mark_initial_fetched(data, "branch:main")
+  end)
 
   icebox.setup({ cooldown_days = 7 })
   local got = icebox.thaw(repo_url, { branch = "main" })
@@ -113,7 +134,7 @@ do
   })
   h.eq(got, HASH2, "override fetch still returns newest commit")
 
-  local data = store.read(repo_url)
+  local data = read_store(repo_url)
   h.eq(#data.branches["main"], 1, "branches.main capped to 1 entry")
   h.eq(data.branches["main"][1], HASH2, "capped entry is the newest commit")
   h.is_nil(data.fetched_at[HASH1], "older commit outside cap is absent from fetched_at")
@@ -136,14 +157,14 @@ do
   -- bg_fetch replacing branches.main entirely with the freshly-fetched
   -- (capped) list.
   local FAKE = "ffffffffffffffffffffffffffffffffffffffff"
-  local data = store.read(repo_url)
-  data.fetched_at[HASH2] = os.time() - 30 * 86400
-  data.fetched_at[FAKE]  = os.time() - 30 * 86400
-  data.branches["main"]  = { HASH2, FAKE }
-  -- Pretend we've already sync-fetched this route so thaw() skips step 2
-  -- and dispatches straight to bg_fetch.
-  store.mark_initial_fetched(data, "branch:main")
-  store.write(repo_url, data)
+  mutate_store(repo_url, function(data)
+    data.fetched_at[HASH2] = os.time() - 30 * 86400
+    data.fetched_at[FAKE]  = os.time() - 30 * 86400
+    data.branches["main"]  = { HASH2, FAKE }
+    -- Pretend we've already sync-fetched this route so thaw() skips step 2
+    -- and dispatches straight to bg_fetch.
+    store.mark_initial_fetched(data, "branch:main")
+  end)
 
   icebox.setup({ branch_commits_per_fetch = 500 })
   -- Kicks off bg_fetch with the override embedded in cfg.
@@ -155,14 +176,14 @@ do
   -- Wait for bg_fetch to finish: it releases the URL's store lock on exit,
   -- and branches.main is overwritten with the freshly-fetched (capped) list.
   local settled = vim.wait(5000, function()
-    local d = store.read(repo_url)
+    local d = read_store(repo_url)
     return d.branches["main"]
       and #d.branches["main"] == 1
       and d.branches["main"][1] == HASH2
   end, 20)
   h.is_true(settled, "bg_fetch settled within timeout")
 
-  local after = store.read(repo_url)
+  local after = read_store(repo_url)
   h.eq(#after.branches["main"], 1,
     "bg_fetch used the per-call override (branches capped to 1)")
   h.eq(after.branches["main"][1], HASH2, "capped entry is the newest commit")
@@ -217,10 +238,10 @@ do
   local before = vim.uv.fs_stat(head_path)
   h.not_nil(before, "cache HEAD exists after first thaw")
 
-  local data = store.read(repo_url)
-  data.fetched_at = {}
-  data.branches   = {}
-  store.write(repo_url, data)
+  mutate_store(repo_url, function(data)
+    data.fetched_at = {}
+    data.branches   = {}
+  end)
 
   icebox.thaw(repo_url, { branch = "main" })
 
@@ -414,7 +435,7 @@ do
   -- future keyless calls would fall back to ls-remote on every startup.
   local git = require("icebox.git")
   local origin = git.origin_url(clone_path)
-  local store_data = store.read(origin)
+  local store_data = read_store(origin)
   h.eq(store_data.default_branch, "main",
     "default_branch is populated from clone_path's origin/HEAD")
 
@@ -447,7 +468,7 @@ do
 
   local git = require("icebox.git")
   local origin = git.origin_url(clone_path)
-  local data = store.read(origin)
+  local data = read_store(origin)
   h.eq(data.default_branch, "main",
     "fallback sync fetch seeded default_branch from clone_path origin")
 
@@ -552,14 +573,14 @@ do
   -- history should be populated in a single pass (probe fallback: ls-remote
   -- discovers there are no semver tags, then branch-fetches default_branch).
   local settled = vim.wait(5000, function()
-    local d = store.read(tagless_url)
+    local d = read_store(tagless_url)
     return d.default_branch == "main"
        and d.branches["main"]
        and #d.branches["main"] >= 1
   end, 20)
   h.is_true(settled, "probe fallback populated default_branch + branches in one pass")
 
-  local d = store.read(tagless_url)
+  local d = read_store(tagless_url)
   h.eq(d.default_branch, "main",           "default_branch populated")
   h.is_true(#d.branches["main"] >= 1,      "branches.main has at least one commit")
   h.is_true(next(d.tags) == nil,           "tags remain empty for tagless upstream")
@@ -580,12 +601,12 @@ do
   -- Fixture repo has semver tags, so fetch_default_async must NOT follow
   -- through with a branch clone; only tags + default_branch land in the store.
   local settled = vim.wait(5000, function()
-    local d = store.read(repo_url)
+    local d = read_store(repo_url)
     return next(d.tags) ~= nil
   end, 20)
   h.is_true(settled, "tags populated within timeout")
 
-  local d = store.read(repo_url)
+  local d = read_store(repo_url)
   h.is_true(d.tags["v1.0.0"] ~= nil,       "tags include v1.0.0")
   h.is_true(next(d.branches) == nil,
     "branches remain empty (branch clone skipped when tags exist)")
@@ -604,7 +625,7 @@ do
   icebox.thaw(mutable_url)  -- probe fallback populates default_branch + main
 
   local branch_ready = vim.wait(5000, function()
-    local d = store.read(mutable_url)
+    local d = read_store(mutable_url)
     return d.branches["main"] and #d.branches["main"] >= 1
   end, 20)
   h.is_true(branch_ready, "branch history populated by probe fallback")
@@ -619,7 +640,7 @@ do
   -- catching the new tag.
   icebox.thaw(mutable_url)
   local tag_seen = vim.wait(5000, function()
-    return store.read(mutable_url).tags["v3.0.0"] ~= nil
+    return read_store(mutable_url).tags["v3.0.0"] ~= nil
   end, 20)
   h.is_true(tag_seen, "keyless bg_fetch surfaced the newly added tag")
 
@@ -643,7 +664,7 @@ do
   -- bypass hash.
   h.eq(got, HASH2, "trust_auto_pin returns candidate[1] on first thaw")
 
-  local data = store.read(repo_url)
+  local data = read_store(repo_url)
   h.eq(store.get_auto_pin(data, "branch:main"), HASH2,
     "initial_pin persisted to store")
 end
@@ -674,7 +695,7 @@ do
   h.eq(got, icebox.ZERO_HASH,
     "no bypass hash → uncooled commits produce ZERO_HASH")
 
-  local data = store.read(repo_url)
+  local data = read_store(repo_url)
   h.is_nil(store.get_auto_pin(data, "branch:main"),
     "initial_pin not written when trust_auto_pin is off")
   h.is_true(store.is_initial_fetched(data, "branch:main"),
@@ -691,7 +712,7 @@ do
   -- First thaw for branch main.
   icebox.thaw(repo_url, { branch = "main", trust_auto_pin = true })
 
-  local data = store.read(repo_url)
+  local data = read_store(repo_url)
   h.eq(store.get_auto_pin(data, "branch:main"), HASH2,
     "initial_pin for main recorded")
 
@@ -707,7 +728,7 @@ do
   h.is_true(got ~= icebox.ZERO_HASH,
     "version route returns a candidate via initial_pin")
 
-  local d2 = store.read(repo_url)
+  local d2 = read_store(repo_url)
   h.not_nil(store.get_auto_pin(d2, "version:^1.0.0"),
     "initial_pin under version pin_key recorded independently")
   h.eq(store.get_auto_pin(d2, "branch:main"), HASH2,
@@ -728,7 +749,7 @@ do
   h.eq(got, icebox.ZERO_HASH,
     "empty candidate set with trust_auto_pin → ZERO_HASH")
 
-  local data = store.read(repo_url)
+  local data = read_store(repo_url)
   h.is_nil(store.get_auto_pin(data, "version:^99.0.0"),
     "initial_pin not recorded when candidate set is empty")
 end
@@ -743,11 +764,11 @@ do
   -- the resolve pipeline. picker would return nil without trusted_commit
   -- because HASH2 is not cooled; asserting HASH2 is returned proves the
   -- opt made it through init.lua to picker.pick.
-  local data = store.read(repo_url)
-  data.fetched_at[HASH2] = os.time() - 3600  -- recent → not cooled
-  data.branches["main"]  = { HASH2 }
-  store.mark_initial_fetched(data, "branch:main")
-  store.write(repo_url, data)
+  mutate_store(repo_url, function(data)
+    data.fetched_at[HASH2] = os.time() - 3600  -- recent → not cooled
+    data.branches["main"]  = { HASH2 }
+    store.mark_initial_fetched(data, "branch:main")
+  end)
 
   local got = icebox.thaw(repo_url, {
     branch         = "main",
@@ -774,7 +795,7 @@ do
   icebox.setup({})
   icebox.thaw(repo_url)  -- keyless: takes the fallback sync path
 
-  local data = store.read(repo_url)
+  local data = read_store(repo_url)
   h.is_true(store.is_initial_fetched(data, "default"),
     "'default' marker set after the fallback sync fetch")
   -- fixture repo has semver tags, so the fallback resolves to the version
@@ -783,51 +804,44 @@ do
     "version:>=0.0.0 marker set — a follow-up version thaw skips step 2")
 end
 
-h.suite("thaw: step 5 store.write failure returns ZERO_HASH + WARN")
+h.suite("thaw: store close failure returns ZERO_HASH + WARN")
 do
-  -- Step 5 records the auto pin and persists it. When store.write fails
-  -- there, the current contract is: WARN + return ZERO_HASH from thaw().
-  -- Monkey-patch store.write to force the failure and confirm the branch
+  -- close() flushes the in-memory handle back to disk at the end of thaw.
+  -- When that write fails, the current contract is: WARN + return
+  -- ZERO_HASH from thaw() (never trust a hash that never made it to disk).
+  -- Monkey-patch store.close to force the failure and confirm the branch
   -- is reachable.
   reset_all()
 
   local store_mod = require("icebox.store")
 
-  -- Prime the store so steps 1/2 are skipped: store.exists() = true,
+  -- Prime the store so steps 1/2 are skipped: store already exists,
   -- is_initial_fetched(..., "branch:main") = true, and main has one commit.
-  do
-    local data = store_mod.read(repo_url)
+  mutate_store(repo_url, function(data)
     data.fetched_at[HASH2] = os.time() - 3600  -- recent → not cooled
     data.branches["main"]  = { HASH2 }
     store_mod.mark_initial_fetched(data, "branch:main")
-    store_mod.write(repo_url, data)
-  end
+  end)
 
-  local original_write = store_mod.write
-  local blocked_write_calls = 0
-  store_mod.write = function(url, data)
-    -- Only intercept step-5's write. Every prior write in this suite has
-    -- already happened via `original_write` above, so any write we see
-    -- here has to be the auto-pin persist.
-    blocked_write_calls = blocked_write_calls + 1
-    return false, "simulated write failure"
+  local original_close = store_mod.close
+  local blocked_close_calls = 0
+  store_mod.close = function(handle)
+    blocked_close_calls = blocked_close_calls + 1
+    -- Simulate a write failure at close time. We still need to release
+    -- the lock so subsequent test suites don't hang.
+    original_close(handle)  -- unlock + best-effort write
+    return nil, "simulated close failure"
   end
 
   icebox.setup({ trust_auto_pin = true })
   local got = icebox.thaw(repo_url, { branch = "main" })
 
-  store_mod.write = original_write
+  store_mod.close = original_close
 
   h.eq(got, icebox.ZERO_HASH,
-    "thaw returns ZERO_HASH when step 5's store.write fails")
-  h.is_true(blocked_write_calls >= 1,
-    "step 5 attempted at least one store.write")
-
-  -- Sanity: the store's auto_pin entry was never persisted (the write
-  -- was blocked). It stays absent so the next thaw call retries the pin.
-  local data = store_mod.read(repo_url)
-  h.is_nil(store_mod.get_auto_pin(data, "branch:main"),
-    "auto_pin not persisted after write failure")
+    "thaw returns ZERO_HASH when the final store close fails")
+  h.is_true(blocked_close_calls >= 1,
+    "thaw called close at least once")
 end
 
 h.summary()

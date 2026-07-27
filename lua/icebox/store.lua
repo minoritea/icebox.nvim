@@ -2,6 +2,11 @@ local M = {}
 
 local semver = require("icebox.semver")
 
+-- Default lock-acquisition timings for M.open. Kept as internal constants
+-- (not user-facing) so we can revisit them without breaking any API.
+local LOCK_WAIT_MS  = 5000  -- give up if the lock stays held this long
+local LOCK_RETRY_MS = 50    -- poll interval while waiting for the lock
+
 -- True on Windows (XDG env vars are rarely set there; use stdpath instead).
 local function is_windows()
   return vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
@@ -27,7 +32,7 @@ function M.path_for(url)
 end
 
 -- Returns path to the lock file for a given URL.
-function M.lock_path_for(url)
+local function lock_path_for(url)
   return vim.fs.joinpath(store_dir(), "locks", vim.fn.sha256(url) .. ".lock")
 end
 
@@ -54,13 +59,6 @@ local function mkdir_p(dir)
   vim.fn.mkdir(dir, "p")
 end
 
--- Returns true if the store file for `url` already exists on disk.
--- Used to distinguish "first-ever thaw call for this URL" from "cached data
--- available"; sync fetch is triggered when the file is absent.
-function M.exists(url)
-  return vim.fn.filereadable(M.path_for(url)) == 1
-end
-
 -- Baseline empty store — used when the file does not exist yet.
 local function empty_store()
   return {
@@ -72,13 +70,12 @@ local function empty_store()
   }
 end
 
--- Read the store table for a URL.
---   - Missing file → empty table (a fresh store).
---   - JSON parse failure → nil + error message; callers must surface a WARN
---     and refuse to proceed rather than silently overwriting broken data.
--- The returned table is trusted as-is: no sanitize pass runs, and downstream
--- code assumes fields have their expected shapes.
-function M.read(url)
+-- ─── File I/O helpers (private) ─────────────────────────────────────────────
+
+-- Read the JSON store from disk. Returns (data, err):
+--   - Missing file → (empty_store(), nil)
+--   - JSON parse failure → (nil, err)
+local function read_file(url)
   local path = M.path_for(url)
   local f = io.open(path, "r")
   if not f then
@@ -103,7 +100,7 @@ function M.read(url)
 end
 
 -- Write the store table for a URL atomically.
-function M.write(url, data)
+local function write_file(url, data)
   local path  = M.path_for(url)
   local dir   = vim.fn.fnamemodify(path, ":h")
   -- Guard against path traversal
@@ -135,6 +132,112 @@ function M.write(url, data)
   vim.uv.fs_chmod(path, tonumber("600", 8))
   return true
 end
+
+-- ─── Lock helpers (private) ─────────────────────────────────────────────────
+
+-- Non-blocking lock acquisition. Returns true if acquired.
+-- Writes current PID to the lock file for stale-lock detection.
+local function try_lock(url)
+  local lock_path = lock_path_for(url)
+  mkdir_p(vim.fn.fnamemodify(lock_path, ":h"))
+
+  -- Attempt atomic create (O_CREAT|O_EXCL equivalent via "wx" flag).
+  local fd = vim.uv.fs_open(lock_path, "wx", tonumber("600", 8))
+  if not fd then
+    -- File already exists: check whether the owning process is still alive.
+    local rf = io.open(lock_path, "r")
+    if not rf then return false end
+    local pid = tonumber(rf:read("*a")); rf:close()
+    if pid then
+      -- vim.uv.kill with signal 0 tests liveness without sending a signal.
+      if vim.uv.kill(pid, 0) == 0 then
+        return false  -- live process holds the lock
+      end
+    end
+    -- Stale lock: remove and retry once.
+    os.remove(lock_path)
+    fd = vim.uv.fs_open(lock_path, "wx", tonumber("600", 8))
+    if not fd then return false end
+  end
+
+  vim.uv.fs_write(fd, tostring(vim.uv.os_getpid()))
+  vim.uv.fs_close(fd)
+  return true
+end
+
+-- Release the lock for a URL.
+local function unlock(url)
+  os.remove(lock_path_for(url))
+end
+
+-- ─── Handle API (public) ────────────────────────────────────────────────────
+--
+-- Store access flows through short-lived handles: open() acquires the
+-- cross-process lock and loads state into memory, close() persists the
+-- state and releases the lock. In between, callers mutate handle.data via
+-- the in-memory helpers below (has_semver_tags, merge, get_auto_pin,
+-- set_auto_pin, is_initial_fetched, mark_initial_fetched) without touching
+-- disk.
+--
+-- Every thaw() and background-fetch call owns exactly one handle for its
+-- lifetime. This keeps the "load once, mutate in memory, write once"
+-- lifecycle predictable and closes the lock-window race that previously
+-- lived inside git.fetch_*.
+
+-- Open a store handle for a URL.
+--   opts.timeout_ms : max ms to wait for the lock (default LOCK_WAIT_MS)
+--   opts.retry_ms   : poll interval while waiting  (default LOCK_RETRY_MS)
+-- Returns (handle, nil) on success, or (nil, err) on failure.
+--
+-- The lock is held for the lifetime of the handle. The caller MUST call
+-- close() when done — the store write and unlock happen there.
+function M.open(url, opts)
+  opts = opts or {}
+  local timeout_ms = opts.timeout_ms or LOCK_WAIT_MS
+  local retry_ms   = opts.retry_ms   or LOCK_RETRY_MS
+
+  -- vim.wait re-tests the predicate until it returns true or the timeout
+  -- fires. Runs the event loop so other coroutines / callbacks still get
+  -- to make progress while we spin.
+  local acquired = try_lock(url)
+  if not acquired then
+    acquired = vim.wait(timeout_ms, function()
+      return try_lock(url)
+    end, retry_ms)
+  end
+  if not acquired then
+    return nil, "store lock timeout for " .. url
+  end
+
+  local data, read_err = read_file(url)
+  if not data then
+    unlock(url)
+    return nil, read_err or "store read failed"
+  end
+
+  return {
+    url  = url,
+    data = data,
+  }
+end
+
+-- Persist the handle's in-memory state and release its lock. Always calls
+-- unlock() so a caller that hits a write error still releases the lock.
+-- Returns (true, nil) on success, or (nil, err) if the write fails.
+function M.close(handle)
+  local ok, write_err = write_file(handle.url, handle.data)
+  unlock(handle.url)
+  if not ok then
+    return nil, write_err or "store write failed"
+  end
+  return true
+end
+
+-- ─── In-memory helpers ──────────────────────────────────────────────────────
+--
+-- These read/mutate the plain data table (typically handle.data). They do
+-- no I/O — the change becomes visible to other processes only after
+-- close() flushes the file.
 
 -- Returns true if store.tags has at least one semver tag.
 function M.has_semver_tags(data)
@@ -201,8 +304,7 @@ function M.get_auto_pin(data, pin_key)
   return data.auto_pin and data.auto_pin[pin_key]
 end
 
--- Record an auto pin for a pin_key. Mutates `data` in place. Callers
--- must persist with M.write to make the change visible across processes.
+-- Record an auto pin for a pin_key. Mutates `data` in place.
 function M.set_auto_pin(data, pin_key, hash)
   data.auto_pin = data.auto_pin or {}
   data.auto_pin[pin_key] = hash
@@ -214,46 +316,10 @@ function M.is_initial_fetched(data, pin_key)
 end
 
 -- Mark a pin_key as having completed its initial sync fetch. Mutates `data`
--- in place. Callers must persist with M.write.
+-- in place.
 function M.mark_initial_fetched(data, pin_key)
   data.initial_fetched = data.initial_fetched or {}
   data.initial_fetched[pin_key] = true
-end
-
--- Try to acquire a lock for a URL. Returns true if acquired.
--- Writes current PID to the lock file.
-function M.lock(url)
-  local lock_path = M.lock_path_for(url)
-  mkdir_p(vim.fn.fnamemodify(lock_path, ":h"))
-
-  -- Attempt atomic create (O_CREAT|O_EXCL equivalent via "wx" flag).
-  local fd = vim.uv.fs_open(lock_path, "wx", tonumber("600", 8))
-  if not fd then
-    -- File already exists: check whether the owning process is still alive.
-    local rf = io.open(lock_path, "r")
-    if not rf then return false end
-    local pid = tonumber(rf:read("*a")); rf:close()
-    if pid then
-      -- vim.uv.kill with signal 0 tests liveness without sending a signal.
-      if vim.uv.kill(pid, 0) == 0 then
-        return false  -- live process holds the lock
-      end
-    end
-    -- Stale lock: remove and retry once.
-    os.remove(lock_path)
-    fd = vim.uv.fs_open(lock_path, "wx", tonumber("600", 8))
-    if not fd then return false end
-  end
-
-  vim.uv.fs_write(fd, tostring(vim.uv.os_getpid()))
-  vim.uv.fs_close(fd)
-  return true
-end
-
--- Release the lock for a URL.
-function M.unlock(url)
-  local lock_path = M.lock_path_for(url)
-  os.remove(lock_path)
 end
 
 return M

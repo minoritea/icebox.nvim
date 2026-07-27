@@ -2,7 +2,6 @@ local M = {}
 
 local validate = require("icebox.validate")
 local semver   = require("icebox.semver")
-local store    = require("icebox.store")
 
 local CLONE_SAFETY_ARGS = {
   "--no-local",
@@ -334,91 +333,26 @@ local function fetch_default_impl(url, opts, limit)
   return merge_new_data(branch_data, { tags = tags_data.tags })
 end
 
--- ─── Public: fetch + persist ────────────────────────────────────────────────
+-- ─── Public: pure network fetch ─────────────────────────────────────────────
 --
--- Each fetch function acquires the URL's cross-process lock, runs the
--- network pipeline, merges the result into the store, and releases the
--- lock. Sync variants return `true` on success or `nil + err`. Async
--- variants are fire-and-forget and surface errors via vim.notify.
-
-local function warn(msg)
-  vim.notify("[icebox] " .. msg, vim.log.levels.WARN)
-end
-
--- Run pipeline_fn under the URL lock; merge its `new_data` into the store.
--- Returns `true` on success or `nil + err` on failure. Never raises.
-local function fetch_and_persist(url, pipeline_fn)
-  if not store.lock(url) then
-    return nil, "URL locked by another process"
-  end
-
-  local new_data, err = pipeline_fn()
-  if not new_data then
-    store.unlock(url)
-    return nil, err or "unknown fetch error"
-  end
-
-  local data, read_err = store.read(url)
-  if not data then
-    store.unlock(url)
-    return nil, read_err or "store read failed"
-  end
-
-  store.merge(data, new_data)
-
-  local ok, write_err = store.write(url, data)
-  store.unlock(url)
-  if not ok then
-    return nil, write_err or "store write failed"
-  end
-  return true
-end
-
--- Wrap a sync fetch in a coroutine so its blocking git calls yield back to
--- the loop. Fire-and-forget: failures are surfaced via WARN.
-local function run_async(url, pipeline_fn)
-  coroutine.wrap(function()
-    local ok, err = fetch_and_persist(url, pipeline_fn)
-    if not ok then
-      warn("bg fetch failed for " .. url .. ": " .. (err or "unknown"))
-    end
-  end)()
-end
+-- Each fetch function performs the network operation and returns the raw
+-- `new_data` shape (default_branch / fetched_at / branches / tags), or
+-- nil + err. Callers are responsible for merging into a store handle.
+--
+-- Sync/async is not distinguished at the API surface: run_cmd yields when
+-- called inside a coroutine, so wrapping a fetch_*_sync call in
+-- coroutine.wrap gives non-blocking behaviour without any extra plumbing.
 
 function M.fetch_branch_sync(url, branch, limit, fetch_target)
-  return fetch_and_persist(url, function()
-    return fetch_branch_impl(url, branch, limit, fetch_target)
-  end)
-end
-
-function M.fetch_branch_async(url, branch, limit, fetch_target)
-  run_async(url, function()
-    return fetch_branch_impl(url, branch, limit, fetch_target)
-  end)
+  return fetch_branch_impl(url, branch, limit, fetch_target)
 end
 
 function M.fetch_tags_sync(url)
-  return fetch_and_persist(url, function()
-    return fetch_tags_impl(url)
-  end)
-end
-
-function M.fetch_tags_async(url)
-  run_async(url, function()
-    return fetch_tags_impl(url)
-  end)
+  return fetch_tags_impl(url)
 end
 
 function M.fetch_default_sync(url, limit, fetch_target)
-  return fetch_and_persist(url, function()
-    return fetch_default_impl(url, fetch_target, limit)
-  end)
-end
-
-function M.fetch_default_async(url, limit, fetch_target)
-  run_async(url, function()
-    return fetch_default_impl(url, fetch_target, limit)
-  end)
+  return fetch_default_impl(url, fetch_target, limit)
 end
 
 return M
