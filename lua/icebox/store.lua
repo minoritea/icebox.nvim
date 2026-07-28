@@ -59,7 +59,7 @@ local function mkdir_p(dir)
   vim.fn.mkdir(dir, "p")
 end
 
--- Baseline empty store — used when the file does not exist yet.
+-- Baseline empty store; used when the file does not exist yet.
 local function empty_store()
   return {
     fetched_at      = {},
@@ -190,7 +190,7 @@ end
 -- Returns (handle, nil) on success, or (nil, err) on failure.
 --
 -- The lock is held for the lifetime of the handle. The caller MUST call
--- close() when done — the store write and unlock happen there.
+-- close() when done; the store write and unlock happen there.
 function M.open(url, opts)
   opts = opts or {}
   local timeout_ms = opts.timeout_ms or LOCK_WAIT_MS
@@ -236,7 +236,7 @@ end
 -- ─── In-memory helpers ──────────────────────────────────────────────────────
 --
 -- These read/mutate the plain data table (typically handle.data). They do
--- no I/O — the change becomes visible to other processes only after
+-- no I/O. The change becomes visible to other processes only after
 -- close() flushes the file.
 
 -- Returns true if store.tags has at least one semver tag.

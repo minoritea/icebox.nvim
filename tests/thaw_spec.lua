@@ -844,4 +844,75 @@ do
     "thaw called close at least once")
 end
 
+h.suite("thaw: sync fetch failure leaves initial_fetched false and next thaw retries")
+do
+  -- REVIEW §8: guard that a failing sync fetch does not accidentally mark
+  -- the route as fetched. The next thaw call on the same route should try
+  -- the sync fetch again instead of jumping straight into the resolver
+  -- against an empty store.
+  reset_all()
+
+  local bad_url = "file:///nonexistent/path/for/icebox/thaw_test.git"
+
+  icebox.setup({})
+  local got = icebox.thaw(bad_url, { branch = "main" })
+  h.eq(got, icebox.ZERO_HASH, "sync fetch failure yields ZERO_HASH")
+
+  -- After the failure the initial_fetched marker must not have been set
+  -- so the next thaw call attempts the fetch again. store.open opens a
+  -- fresh handle because the fetch failure path still creates the store
+  -- file with the empty template.
+  local handle = store.open(bad_url)
+  h.not_nil(handle, "store.open succeeds → lock was released after the failure")
+  h.is_false(store.is_initial_fetched(handle.data, "branch:main"),
+    "initial_fetched not marked after a failed sync fetch")
+  h.eq(next(handle.data.fetched_at), nil,
+    "fetched_at remains empty after a failed sync fetch")
+  h.is_nil(handle.data.branches["main"],
+    "branches.main not created after a failed sync fetch")
+  store.close(handle)
+end
+
+h.suite("thaw: bg coroutine error does not leak the URL lock")
+do
+  -- Regression guard for the pcall wrapper around the bg fetch coroutine.
+  -- If a fetch inside the coroutine raises, the pcall + explicit close
+  -- must still release the URL lock, otherwise later thaws on the same
+  -- URL time out for the rest of the session.
+  vim.wait(2000, function() return false end, 20)
+  reset_all()
+
+  -- Prime the store so steps 1/2 skip and step 3 arms the bg coroutine.
+  -- HASH2 is old enough to be cooled under the default cooldown so the
+  -- sync path returns HASH2 while the bg coroutine runs afterwards.
+  mutate_store(repo_url, function(data)
+    data.fetched_at[HASH2] = os.time() - 30 * 86400
+    data.branches["main"]  = { HASH2 }
+    store.mark_initial_fetched(data, "branch:main")
+  end)
+
+  -- Monkey-patch git.fetch_branch_sync so the bg coroutine throws.
+  local git_mod = require("icebox.git")
+  local original_fetch = git_mod.fetch_branch_sync
+  git_mod.fetch_branch_sync = function()
+    error("simulated bg fetch failure")
+  end
+
+  icebox.setup({})
+  local got = icebox.thaw(repo_url, { branch = "main" })
+  h.eq(got, HASH2, "sync path returns cooled hash before bg coroutine fires")
+
+  -- Wait for the scheduled bg coroutine to run and blow up.
+  vim.wait(1000, function() return false end, 20)
+
+  git_mod.fetch_branch_sync = original_fetch
+
+  -- Verify the lock is not leaked. A short timeout is enough because the
+  -- lock should be released already, so try_lock succeeds immediately.
+  local h1, err = store.open(repo_url, { timeout_ms = 200 })
+  h.not_nil(h1, "store.open succeeds after the bg coroutine error")
+  h.is_nil(err, "no timeout error → the URL lock was released")
+  if h1 then store.close(h1) end
+end
+
 h.summary()

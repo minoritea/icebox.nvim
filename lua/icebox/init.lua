@@ -15,7 +15,7 @@ local function warn(msg)
   vim.notify("[icebox] " .. msg, vim.log.levels.WARN)
 end
 
---- Configure icebox.nvim. Optional — if setup() is never called, thaw() uses
+--- Configure icebox.nvim. Optional. If setup() is never called, thaw() uses
 --- the built-in defaults (cooldown_days=7, trust_auto_pin=false,
 --- branch_commits_per_fetch=500). Per-call overrides on thaw() opts take
 --- precedence over both setup values and defaults.
@@ -38,7 +38,7 @@ end
 -- Build the fetch_target table passed to git.fetch_*_sync calls. Wraps the
 -- "use clone_path if given, else fall back to the icebox-owned cache_dir"
 -- choice so callers don't have to repeat it. This helper does not touch
--- thaw state — it just translates opts into fetch arguments.
+-- thaw state; it just translates opts into fetch arguments.
 local function fetch_target_for(url, opts)
   if opts.clone_path then
     return { clone_path = opts.clone_path }
@@ -48,41 +48,21 @@ end
 
 -- ─── thaw() ─────────────────────────────────────────────────────────────────
 --
--- Signatures (exactly these three are accepted; any other shape is a parse
--- error surfaced as WARN + ZERO_HASH):
---   thaw(url_string)                → URL is url_string
---   thaw(url_string, opts_table)    → URL is url_string; opts_table must not carry url/clone_path
---   thaw(opts_table)                → URL comes from opts_table.url or opts_table.clone_path
+-- Signatures (exactly these three are accepted; any other shape fails):
+--   thaw(url_string)
+--   thaw(url_string, opts_table)
+--   thaw(opts_table)
 --
--- opts.clone_path (when set) is the path to an EXISTING external clone
--- (typically maintained by a plugin manager) — NOT an icebox-owned cache.
--- The path must exist and be a git repository; icebox does not create it.
--- Its `origin` remote supplies the URL used for the store key and fetches.
+-- Reads the first-observation timestamps stored locally for commits on the
+-- requested source, and returns the newest cooled commit within that
+-- range. Store refreshes happen in the background, so thaw() resolves
+-- against whatever the store held at call time. Two exceptions run a
+-- synchronous fetch instead: when the store has not been initialised yet,
+-- and when this specific (url, route) combination is being called for the
+-- first time.
 --
--- The three URL sources — the `url` positional argument, `opts.url`, and
--- `opts.clone_path` (via its origin remote) — are MUTUALLY EXCLUSIVE.
--- Specifying more than one is a parse error (WARN + ZERO_HASH). Specifying
--- none is also an error.
---
--- Resolution proceeds in six steps:
---   1. Sync fetch when the store did not have this route recorded and the
---      route (branch/version/fallback) has just come into scope for the
---      first time — that is, "store was previously empty" collapses into
---      the same "first fetch for this route" branch as step 2 below.
---   2. Sync fetch when the store exists but this route has not been fetched.
---   3. Otherwise queue a bg fetch to fire after every other step, whether
---      or not those steps succeed.
---   4. Collect the candidate set for the resolved route.
---   5. When trust_auto_pin is on, record or read the auto pin (per (URL,
---      route), written exactly once on the first thaw call where the pin
---      is missing).
---   6. Delegate to picker.pick for the 3-way winner (cooled / auto_pin /
---      trusted_commit).
---
--- The store handle acquired in the middle of thaw() covers steps 1–5:
--- every read and mutation targets in-memory state, and close() flushes
--- once at the end. A bg fetch scheduled by step 3 opens its own handle
--- from a coroutine after thaw() has already returned to the caller.
+-- Returns |icebox.ZERO_HASH| on failure. See |icebox.thaw()| in
+-- doc/icebox.txt for the full list of accepted opts.
 function M.thaw(url_or_opts, opts)
   local bg_fetch_fn  -- set by step 3; scheduled after the main body returns
 
@@ -175,7 +155,7 @@ function M.thaw(url_or_opts, opts)
     end
 
     -- Open the store handle. Blocks (with vim.wait) for up to a few seconds
-    -- if another process holds the lock — typically the case when a
+    -- if another process holds the lock, typically the case when a
     -- concurrent thaw is running its own sync fetch. Timing out here means
     -- we give up on this thaw call; a subsequent call will retry.
     local handle, open_err = store.open(url)
@@ -184,123 +164,151 @@ function M.thaw(url_or_opts, opts)
       return ZERO_HASH
     end
 
-    -- All state mutations from here on target handle.data. close() below
-    -- flushes to disk and releases the lock.
-    local data = handle.data
+    -- Everything from here on runs inside a pcall so that any error thrown
+    -- between store.open and store.close still releases the URL lock. Lua
+    -- has no `finally`; this pcall + explicit close below is our stand-in.
+    -- `winner` and `sync_fetch_failed` are captured via upvalue so the
+    -- outer code can act on them after the guarded block returns.
+    local winner
+    local sync_fetch_failed = false
+    local sync_fetch_err
 
-    -- Steps 1/2: sync fetch when this route has never been fetched before.
-    -- We never enter both branches on the same call — is_initial_fetched
-    -- is monotonic and steps 1 and 2 are two names for the same "first
-    -- fetch for this route" condition (step 1 covers the fresh-store case
-    -- because is_initial_fetched(...) is false on a brand-new empty store).
-    local ran_sync_fetch = false
-    if not store.is_initial_fetched(data, initial_fetched_key) then
-      local new_data, fetch_err
-      if opts.branch then
-        new_data, fetch_err = git.fetch_branch_sync(url, opts.branch,
-          cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
-      elseif opts.version then
-        new_data, fetch_err = git.fetch_tags_sync(url)
-      else
-        new_data, fetch_err = git.fetch_default_sync(url,
-          cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
-      end
-      if not new_data then
-        store.close(handle)
-        warn("sync fetch failed: " .. (fetch_err or "unknown"))
-        return ZERO_HASH
+    local guarded_ok, guarded_err = pcall(function()
+      local data = handle.data
+
+      -- Steps 1/2: sync fetch when this route has never been fetched
+      -- before. We never enter both branches on the same call:
+      -- is_initial_fetched is monotonic and steps 1 and 2 are two names
+      -- for the same "first fetch for this route" condition (step 1
+      -- covers the fresh-store case because is_initial_fetched(...) is
+      -- false on a brand-new empty store).
+      local ran_sync_fetch = false
+      if not store.is_initial_fetched(data, initial_fetched_key) then
+        local new_data, fetch_err
+        if opts.branch then
+          new_data, fetch_err = git.fetch_branch_sync(url, opts.branch,
+            cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
+        elseif opts.version then
+          new_data, fetch_err = git.fetch_tags_sync(url)
+        else
+          new_data, fetch_err = git.fetch_default_sync(url,
+            cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
+        end
+        if not new_data then
+          sync_fetch_failed = true
+          sync_fetch_err    = fetch_err
+          return
+        end
+
+        store.merge(data, new_data)
+        store.mark_initial_fetched(data, initial_fetched_key)
+        -- For the fallback route the fetch also fully populates whichever
+        -- concrete route the fallback ends up on; mark that route as
+        -- fetched too so a later thaw with `branch = <default>` does not
+        -- fire again.
+        if initial_fetched_key == "default" then
+          if store.has_semver_tags(data) then
+            store.mark_initial_fetched(data, "version:>=0.0.0")
+          elseif data.default_branch then
+            store.mark_initial_fetched(data, "branch:" .. data.default_branch)
+          end
+        end
+        ran_sync_fetch = true
       end
 
-      store.merge(data, new_data)
-      store.mark_initial_fetched(data, initial_fetched_key)
-      -- For the fallback route the fetch also fully populates whichever
-      -- concrete route the fallback ends up on; mark that route as fetched
-      -- too so a later thaw with `branch = <default>` does not fire again.
-      if initial_fetched_key == "default" then
-        if store.has_semver_tags(data) then
-          store.mark_initial_fetched(data, "version:>=0.0.0")
-        elseif data.default_branch then
-          store.mark_initial_fetched(data, "branch:" .. data.default_branch)
+      -- Step 3: arm a bg fetch for after the main body returns. Never
+      -- fires when steps 1/2 already ran a sync fetch. The store is
+      -- fresh enough. The coroutine body is pcall-guarded so an
+      -- unexpected error inside it does not leak the URL lock.
+      if not ran_sync_fetch then
+        bg_fetch_fn = function()
+          coroutine.wrap(function()
+            local bg_handle, bg_err = store.open(url)
+            if not bg_handle then
+              warn("bg store open failed: " .. (bg_err or ""))
+              return
+            end
+            local bg_ok, bg_pcall_err = pcall(function()
+              local new_data, fetch_err
+              if opts.branch then
+                new_data, fetch_err = git.fetch_branch_sync(url, opts.branch,
+                  cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
+              elseif opts.version then
+                new_data, fetch_err = git.fetch_tags_sync(url)
+              else
+                new_data, fetch_err = git.fetch_default_sync(url,
+                  cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
+              end
+              if new_data then
+                store.merge(bg_handle.data, new_data)
+              else
+                warn("bg fetch failed: " .. (fetch_err or "unknown"))
+              end
+            end)
+            local close_ok, close_err = store.close(bg_handle)
+            if not close_ok then
+              warn("bg store close failed: " .. (close_err or ""))
+            end
+            if not bg_ok then
+              warn("bg fetch coroutine error: " .. tostring(bg_pcall_err))
+            end
+          end)()
         end
       end
-      ran_sync_fetch = true
-    end
 
-    -- Step 3: arm a bg fetch for after the main body returns. Never fires
-    -- when steps 1/2 already ran a sync fetch — the store is fresh enough.
-    if not ran_sync_fetch then
-      bg_fetch_fn = function()
-        coroutine.wrap(function()
-          local bg_handle, bg_err = store.open(url)
-          if not bg_handle then
-            warn("bg store open failed: " .. (bg_err or ""))
-            return
-          end
-          local new_data, fetch_err
-          if opts.branch then
-            new_data, fetch_err = git.fetch_branch_sync(url, opts.branch,
-              cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
-          elseif opts.version then
-            new_data, fetch_err = git.fetch_tags_sync(url)
-          else
-            new_data, fetch_err = git.fetch_default_sync(url,
-              cfg.branch_commits_per_fetch, fetch_target_for(url, opts))
-          end
-          if new_data then
-            store.merge(bg_handle.data, new_data)
-          else
-            warn("bg fetch failed: " .. (fetch_err or "unknown"))
-          end
-          local close_ok, close_err = store.close(bg_handle)
-          if not close_ok then
-            warn("bg store close failed: " .. (close_err or ""))
-          end
-        end)()
+      -- Step 4: pick the route we resolve against and collect its
+      -- candidate set. `opts` is never mutated; the fallback route is
+      -- only expressed via the local `auto_pin_key` and `candidates` we
+      -- set here.
+      local candidates
+      local auto_pin_key
+      if opts.branch then
+        auto_pin_key = "branch:" .. opts.branch
+        candidates   = collector.from_branch(data, opts.branch)
+      elseif opts.version then
+        auto_pin_key = "version:" .. opts.version
+        candidates   = collector.from_version(data, opts.version, opts.normalize)
+      elseif store.has_semver_tags(data) then
+        auto_pin_key = "version:>=0.0.0"
+        candidates   = collector.from_version(data, ">=0.0.0", opts.normalize)
+      elseif data.default_branch then
+        auto_pin_key = "branch:" .. data.default_branch
+        candidates   = collector.from_branch(data, data.default_branch)
+      else
+        warn("upstream has neither semver tags nor a known default branch")
+        return
       end
-    end
 
-    -- Step 4: pick the route we resolve against and collect its candidate
-    -- set. `opts` is never mutated; the fallback route is only expressed
-    -- via the local `auto_pin_key` and `candidates` we set here.
-    local candidates
-    local auto_pin_key
-    if opts.branch then
-      auto_pin_key = "branch:" .. opts.branch
-      candidates   = collector.from_branch(data, opts.branch)
-    elseif opts.version then
-      auto_pin_key = "version:" .. opts.version
-      candidates   = collector.from_version(data, opts.version, opts.normalize)
-    elseif store.has_semver_tags(data) then
-      auto_pin_key = "version:>=0.0.0"
-      candidates   = collector.from_version(data, ">=0.0.0", opts.normalize)
-    elseif data.default_branch then
-      auto_pin_key = "branch:" .. data.default_branch
-      candidates   = collector.from_branch(data, data.default_branch)
-    else
-      store.close(handle)
-      warn("upstream has neither semver tags nor a known default branch")
+      -- Step 5: read or write the auto pin. Only fires when the caller
+      -- opted in via trust_auto_pin. The pin is written exactly once per
+      -- (URL, route). If one already exists we reuse it verbatim.
+      local auto_pin
+      if cfg.trust_auto_pin then
+        auto_pin = store.get_auto_pin(data, auto_pin_key)
+        if auto_pin == nil and candidates[1] then
+          auto_pin = candidates[1]
+          store.set_auto_pin(data, auto_pin_key, auto_pin)
+        end
+      end
+
+      -- Step 6: three-way winner from cooled / auto_pin / trusted_commit.
+      winner = picker.pick(candidates, data.fetched_at,
+                            cooldown_sec, now, auto_pin, opts.trusted_commit)
+    end)
+
+    -- Flush and release the lock. Runs unconditionally: on the pcall
+    -- error path this is the only reason the lock does not leak; on the
+    -- normal path this is where sync fetch results actually persist.
+    local close_ok, close_err = store.close(handle)
+
+    if not guarded_ok then
+      warn("thaw error: " .. tostring(guarded_err))
       return ZERO_HASH
     end
-
-    -- Step 5: read or write the auto pin. Only fires when the caller opted
-    -- in via trust_auto_pin. The pin is written exactly once per (URL,
-    -- route) — if one already exists we reuse it verbatim.
-    local auto_pin
-    if cfg.trust_auto_pin then
-      auto_pin = store.get_auto_pin(data, auto_pin_key)
-      if auto_pin == nil and candidates[1] then
-        auto_pin = candidates[1]
-        store.set_auto_pin(data, auto_pin_key, auto_pin)
-      end
+    if sync_fetch_failed then
+      warn("sync fetch failed: " .. (sync_fetch_err or "unknown"))
+      return ZERO_HASH
     end
-
-    -- Step 6: three-way winner from cooled / auto_pin / trusted_commit.
-    local winner = picker.pick(candidates, data.fetched_at,
-                                cooldown_sec, now, auto_pin, opts.trusted_commit)
-
-    -- Flush and release the lock. Any error here surfaces as ZERO_HASH so
-    -- callers do not silently trust a hash that never made it to disk.
-    local close_ok, close_err = store.close(handle)
     if not close_ok then
       warn("store close failed: " .. (close_err or ""))
       return ZERO_HASH

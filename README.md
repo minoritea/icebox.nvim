@@ -2,7 +2,7 @@
 
 Cooldown-based commit resolver for Neovim.
 
-icebox.nvim returns the most recent commit hash for a Git repository that has been "in the icebox" for at least a configurable number of days. Use it with your plugin manager's commit-pinning feature to avoid adopting freshly released commits before bugs — or malicious changes — have had time to surface.
+icebox.nvim returns the most recent commit hash for a Git repository that has been "in the icebox" for at least a configurable number of days. Use it with your plugin manager's commit-pinning feature to avoid adopting freshly released commits before bugs (or malicious changes) have had time to surface.
 
 ## Why
 
@@ -52,7 +52,7 @@ icebox.setup({
 local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand it to your plugin manager
 ```
 
-**Note.** `thaw()` runs a synchronous fetch — and blocks briefly on that one call — the first time it sees a given (repository, route) pair, where a "route" is `branch = <name>`, `version = <range>`, or the fallback used when neither is specified. Adding a new plugin, switching a plugin from `branch` to `version`, or renaming the pinned branch all trip a fresh sync fetch. Once the route has been fetched, subsequent `thaw()` calls skip the sync fetch and only refresh in the background. Because nothing has cooled yet on that first call, the default behaviour is to return `ZERO_HASH` and let cooldown build up over subsequent Neovim starts. To get a usable hash immediately, opt into `trust_auto_pin = true`, which records the newest hash upstream is currently pointing at as an auto pin — written exactly once per (URL, route) and never overwritten by later thaws — and reuses it until a newer cooled hash is available. `trusted_commit` (per-call) works similarly but pins a specific commit you already verified. Both are opt-in escape hatches from the cooldown; use them at your own discretion.
+**Note.** `thaw()` runs a synchronous fetch, blocking briefly on that one call, the first time it sees a given (repository, route) pair, where a "route" is `branch = <name>`, `version = <range>`, or the fallback used when neither is specified. Adding a new plugin, switching a plugin from `branch` to `version`, or renaming the pinned branch all trip a fresh sync fetch. Once the route has been fetched, subsequent `thaw()` calls skip the sync fetch and only refresh in the background. Because nothing has cooled yet on that first call, the default behaviour is to return `ZERO_HASH` and let cooldown build up over subsequent Neovim starts. To get a usable hash immediately, opt into `trust_auto_pin = true`, which records the newest hash upstream is currently pointing at as an auto pin (written exactly once per (URL, route) and never overwritten by later thaws) and reuses it until a newer cooled hash is available. `trusted_commit` (per-call) works similarly but pins a specific commit you already verified. Both are opt-in escape hatches from the cooldown; use them at your own discretion.
 
 ## API
 
@@ -121,18 +121,18 @@ thaw request
          fallback to tags if any, else the default branch)
       5. if trust_auto_pin is on and no pin exists yet, record candidates[1]
          as the auto pin for this (URL, route)
-      6. return the "newest" candidate — smallest index in the array — among:
+      6. return the "newest" candidate (smallest index in the array) among:
          - the newest cooled commit
          - trusted_commit (when it is in the candidate set)
          - auto_pin (when trust_auto_pin is on and it is in the set)
-      Falls back to ZERO_HASH when none of the three is in the candidate set.
+      Falls back to ZERO_HASH when none of the three sources yields an in-set hash.
 ```
 
 Steps 1 and 2 block on their sync fetch, so a brand-new repository or a
 newly-added route pays a startup cost on that one call. Every later call
 skips the sync fetch and only enqueues the async refresh in step 3.
 
-The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository. Initial pins and the "has this route been fetched" flag live in the same file.
+The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository. Auto pins and the "has this route been fetched" flag live in the same file.
 
 ## License
 

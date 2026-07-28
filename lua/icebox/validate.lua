@@ -24,7 +24,7 @@ function M.url(url)
     return false, "url contains invalid characters"
   end
   -- Reject `~`-prefixed paths in URL position. `~` has no meaning outside a
-  -- shell, and icebox never expands it for URLs — callers must pass an
+  -- shell, and icebox never expands it for URLs. Callers must pass an
   -- already-expanded path (e.g. via vim.fn.expand()) if they want a local
   -- absolute path here.
   if url:sub(1, 1) == "~" then
@@ -69,12 +69,12 @@ end
 
 -- Validate and expand a clone_path.
 --
--- A clone_path points to an EXISTING local clone of the upstream repo — one
+-- A clone_path points to an EXISTING local clone of the upstream repo, one
 -- that another tool (e.g. a plugin manager) already maintains. This is NOT
 -- an icebox-owned cache: the directory must exist and be a git repository at
 -- call time; icebox never creates, initializes, or clones into this path.
 -- If the directory is missing, this function returns nil + error (which the
--- caller surfaces as vim.notify WARN + ZERO_HASH) — no auto-creation.
+-- caller surfaces as a WARN and returns |icebox.ZERO_HASH|). No auto-creation.
 --
 -- Trust boundary: the caller is responsible for choosing a trustworthy path.
 -- icebox does not check whether the directory is a symlink, world-writable,

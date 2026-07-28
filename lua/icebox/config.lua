@@ -20,7 +20,7 @@ local _cfg = vim.deepcopy(DEFAULTS)
 function M.set(opts)
   if type(opts) == "table" and opts.trust_on_first_use ~= nil then
     error("[icebox] `trust_on_first_use` has been removed. "
-          .. "Use `trust_auto_pin` instead — see :help icebox-opt-trust-auto-pin")
+          .. "Use `trust_auto_pin` instead. See :help icebox-opt-trust-auto-pin")
   end
   local new_cfg = vim.deepcopy(DEFAULTS)
   if type(opts) == "table" then

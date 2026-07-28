@@ -180,7 +180,7 @@ end
 -- ─── Pipeline implementations (single source of truth) ──────────────────────
 
 -- Fetch a branch history from `clone_path`, which is an EXISTING local clone
--- maintained by another tool (e.g. a plugin manager) — NOT an icebox cache.
+-- maintained by another tool (e.g. a plugin manager). NOT an icebox cache.
 -- Preconditions: the path exists and is a git repository (validate.clone_path
 -- enforces this at the call site). This function never creates, initializes,
 -- or clones into the path; a missing/broken directory is treated as an error.
@@ -307,8 +307,8 @@ local function merge_new_data(a, b)
 end
 
 -- Fallback fetch pipeline used when the caller did not specify branch or
--- version. Runs `ls-remote --symref` to seed default_branch and tags, then —
--- when upstream has no semver tags — follows through with a branch fetch
+-- version. Runs `ls-remote --symref` to seed default_branch and tags.
+-- When upstream has no semver tags, follows through with a branch fetch
 -- against the discovered default_branch. Callers get a single new_data table
 -- covering whichever route the fallback ends up on.
 local function fetch_default_impl(url, opts, limit)

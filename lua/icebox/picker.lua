@@ -7,17 +7,17 @@ local M = {}
 -- semver-wise) is at a smaller index.
 --
 -- Selection rule: return the hash whose index is the smallest among
--- {newest cooled commit, initial_pin, trusted_commit} inside the array.
+-- {newest cooled commit, auto_pin, trusted_commit} inside the array.
 -- If none of them appear in `candidates`, return nil. The caller substitutes
 -- nil with ZERO_HASH.
 --
 -- Cooldown is compared per-hash using `fetched_at[hash] + cooldown_sec <= now`.
--- Both `initial_pin` and `trusted_commit` bypass the cooldown gate but still
+-- Both `auto_pin` and `trusted_commit` bypass the cooldown gate but still
 -- require membership in the candidate set; a bypass hash outside `candidates`
 -- is ignored.
 --
 -- Commit-object timestamps are never consulted.
-function M.pick(candidates, fetched_at, cooldown_sec, now, initial_pin, trusted_commit)
+function M.pick(candidates, fetched_at, cooldown_sec, now, auto_pin, trusted_commit)
   local cooled_idx  = nil
   local pin_idx     = nil
   local trusted_idx = nil
@@ -29,7 +29,7 @@ function M.pick(candidates, fetched_at, cooldown_sec, now, initial_pin, trusted_
         cooled_idx = i
       end
     end
-    if initial_pin and not pin_idx and hash == initial_pin then
+    if auto_pin and not pin_idx and hash == auto_pin then
       pin_idx = i
     end
     if trusted_commit and not trusted_idx and hash == trusted_commit then
@@ -37,7 +37,7 @@ function M.pick(candidates, fetched_at, cooldown_sec, now, initial_pin, trusted_
     end
     -- Early exit once every candidate we care about has been located.
     if cooled_idx
-       and (not initial_pin    or pin_idx)
+       and (not auto_pin       or pin_idx)
        and (not trusted_commit or trusted_idx) then
       break
     end

@@ -67,7 +67,7 @@ Windows ~
                                                               *icebox-windows*
 Windows is supported on an experimental basis. Where this document
 refers to `$XDG_DATA_HOME` or `$XDG_CACHE_HOME`, read them as
-`stdpath("data")` and `stdpath("cache")` respectively — icebox falls
+`stdpath("data")` and `stdpath("cache")` respectively. icebox falls
 back to these when the corresponding XDG environment variables are not
 set, which is the typical case on Windows.
 
@@ -100,7 +100,7 @@ Once the store is up to date, icebox picks the commit as follows:
          (`fetched_at + cooldown_days <= now`),
        - `trusted_commit` (when it is in the candidate set), and
        - the auto pin recorded under `trust_auto_pin` (when set).
-       "Newest" means the smallest index in the candidate array — commit
+       "Newest" means the smallest index in the candidate array. Commit
        object timestamps are never consulted.
 
 If none of the three sources yield an in-set hash, |icebox.ZERO_HASH| is
@@ -166,9 +166,9 @@ trust_auto_pin                                   *icebox-opt-trust-auto-pin*
   it will pin that compromised commit. Only enable this option for plugins
   whose current upstream state you are willing to sign off on manually.
 
-  The pin is stored per (URL, route). It is written exactly once — on
+  The pin is stored per (URL, route). It is written exactly once, on
   the first thaw call where `trust_auto_pin` is on and the store has no
-  pin for that (URL, route) yet — and is not overwritten by later thaw
+  pin for that (URL, route) yet, and is not overwritten by later thaw
   calls. A different branch or version pins independently.
 
 branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
@@ -180,7 +180,7 @@ branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
 
   Only the newest N commits (in first-parent order) become candidates for
   branch resolution. Commits older than this window are simply not returned
-  by that fetch — a later fetch that surfaces them will add them to the
+  by that fetch. A later fetch that surfaces them will add them to the
   store. Existing entries in `fetched_at` are preserved across fetches, so
   the original observation timestamp of a commit is never overwritten.
 
@@ -194,22 +194,20 @@ branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
 icebox.thaw({url}, {opts})                                    *icebox.thaw()*
 
 Given a repository URL, returns the newest cooled commit hash. GitHub
-shorthand (`owner/repo`) is also accepted. |icebox.ZERO_HASH| is returned
-when no cooled commit is available yet or when an error occurs.
+shorthand (`owner/repo`) is also accepted. See |icebox.ZERO_HASH| for the
+sentinel returned on failure.
 
-Callable in exactly one of these three forms; any other call shape is a
-parse error (WARN + |icebox.ZERO_HASH|):
-  - `thaw(url)`         — positional URL string
-  - `thaw(url, opts)`   — positional URL string + opts table
-  - `thaw(opts)`        — single opts table (URL from opts.url or opts.clone_path)
+Callable in exactly one of these three forms; any other call shape fails:
+  `thaw(url)`         positional URL string
+  `thaw(url, opts)`   positional URL string plus opts table
+  `thaw(opts)`        single opts table (URL from opts.url or opts.clone_path)
 
 URL sources are MUTUALLY EXCLUSIVE. Exactly one of the following must be
 provided:
-    {url} argument   — Git URL as a string
-    opts.url         — same, but inside the opts table
-    opts.clone_path  — URL is resolved from the clone's `origin` remote
-If more than one is specified, or none is specified, |icebox.thaw()| emits a
-|vim.notify| WARN and returns |icebox.ZERO_HASH|.
+    {url} argument   Git URL as a string
+    opts.url         same, but inside the opts table
+    opts.clone_path  URL is resolved from the clone's `origin` remote
+Specifying more than one, or none, fails.
 
 Parameters:
   {url}   (string) Any valid Git URL, or a GitHub shorthand (`owner/repo`).
@@ -260,7 +258,7 @@ normalize                                        *icebox-thaw-opt-normalize*
   Non-semver tags should be excluded from the returned map (it may have
   fewer entries than the input list, or be empty).
 
-  Example — accept two-segment tags like `1.4` by defaulting patch to 0: >lua
+  Example accepting two-segment tags like `1.4` by defaulting patch to 0: >lua
     icebox.thaw(url, {
       version   = ">=1.0.0",
       normalize = function(tags)
@@ -279,7 +277,7 @@ trusted_commit                              *icebox-thaw-opt-trusted-commit*
   Type: string (40-char hex)
   Set this to bypass the cooldown for a specific commit hash you have
   already verified as safe. The bypass applies only when the hash belongs
-  to the candidate set implied by `branch` or `version` — a
+  to the candidate set implied by `branch` or `version`. A
   `trusted_commit` outside that set is ignored.
 
   When both a cooled commit and `trusted_commit` are available in the
@@ -332,15 +330,15 @@ clone_path                                      *icebox-thaw-opt-clone-path*
   The upstream URL is taken from the clone's `origin` remote and used
   as the store key and fetch target. Mutually exclusive with the
   positional {url} and `opts.url`; specifying more than one source
-  emits a WARN and returns |icebox.ZERO_HASH|.
+  fails.
 
   icebox does not own this clone. It never creates the directory,
   initializes a repo there, or clones into it. The path must already
   exist, be a valid git repository, and have an `origin` remote; if
-  any of these conditions fails, |icebox.thaw()| emits a WARN and
-  returns |icebox.ZERO_HASH| with no fallback to the icebox cache.
-  Paths are normalized via `vim.fs.normalize` (so `~`, `..`, and
-  redundant slashes are resolved).
+  any of these conditions is not met, |icebox.thaw()| fails with no
+  fallback to the icebox cache. Paths are normalized via
+  `vim.fs.normalize` (so `~`, `..`, and redundant slashes are
+  resolved).
 
   icebox's writes to the clone are limited to `git fetch --no-tags`
   and reads via `git log --first-parent FETCH_HEAD`. Local refs
@@ -362,10 +360,12 @@ clone_path                                      *icebox-thaw-opt-clone-path*
 ------------------------------------------------------------------------------
 icebox.ZERO_HASH                                            *icebox.ZERO_HASH*
 
-The value returned when no cooled commit is available or an error occurs.
-It is an all-zero Git hash string, which Git treats as an invalid commit
-hash. When combining with a plugin manager, the recommended usage is to
-pass it through unchanged and let the plugin manager fail on it.
+Sentinel value returned by |icebox.thaw()| whenever it cannot commit to a
+concrete hash. Any failure inside |icebox.thaw()|, and any case where no
+cooled commit is available yet, produces |icebox.ZERO_HASH|. It is an
+all-zero Git hash string, which Git treats as an invalid commit hash.
+When combining with a plugin manager, the recommended usage is to pass it
+through unchanged and let the plugin manager fail on it.
 
 ------------------------------------------------------------------------------
 icebox.lazy.cooldown({spec})                          *icebox.lazy.cooldown()*
