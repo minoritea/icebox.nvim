@@ -45,14 +45,12 @@ Think of icebox.nvim as a freezer: commits arrive, sit inside for the cooldown p
 local icebox = require("icebox")
 
 icebox.setup({
-  cooldown_days     = 7,
-  trust_auto_pin = true,  -- opt-in; see the note below
+  cooldown_days  = 7,
+  trust_auto_pin = true,
 })
 
 local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand it to your plugin manager
 ```
-
-**Note.** `thaw()` runs a synchronous fetch, blocking briefly on that one call, the first time it sees a given (repository, route) pair, where a "route" is `branch = <name>`, `version = <range>`, or the fallback used when neither is specified. Adding a new plugin, switching a plugin from `branch` to `version`, or renaming the pinned branch all trip a fresh sync fetch. Once the route has been fetched, subsequent `thaw()` calls skip the sync fetch and only refresh in the background. Because nothing has cooled yet on that first call, the default behaviour is to return `ZERO_HASH` and let cooldown build up over subsequent Neovim starts. To get a usable hash immediately, opt into `trust_auto_pin = true`, which records the newest hash upstream is currently pointing at as an auto pin (written exactly once per (URL, route) and never overwritten by later thaws) and reuses it until a newer cooled hash is available. `trusted_commit` (per-call) works similarly but pins a specific commit you already verified. Both are opt-in escape hatches from the cooldown; use them at your own discretion.
 
 ## API
 
@@ -61,7 +59,7 @@ local commit = icebox.thaw("stevearc/oil.nvim") -- returns a cooled commit; hand
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `cooldown_days` | number | `7` | Days a commit must be known before it is returned. `0` disables cooldown. |
-| `trust_auto_pin` | boolean | `false` | When `true`, records the newest hash observed for this (URL, route) as an auto pin on the first thaw call and reuses it as a cooldown-bypass hash until a newer cooled hash is available. The pin is written exactly once per (URL, route) and never overwritten by later thaws. |
+| `trust_auto_pin` | boolean | `false` | When `true`, records the newest hash from the current candidate set as an auto pin on the first thaw call for this (URL, range) and reuses it as a cooldown-bypass hash until a newer cooled hash is available. The pin is written exactly once per (URL, range) and never overwritten by later thaws. |
 | `branch_commits_per_fetch` | number | `500` | Maximum number of branch commits pulled per fetch (`git log -n`). Older commits already recorded in the store keep their original `fetched_at`; a later fetch that reveals commits beyond this window will pick them up over subsequent runs. |
 
 ### `icebox.thaw(url, opts)` / `icebox.thaw(opts)`
@@ -72,14 +70,14 @@ Given a repository URL, returns the newest cooled commit hash. GitHub shorthand 
 local commit = icebox.thaw("stevearc/oil.nvim")
 ```
 
-Each `thaw()` call also triggers a background fetch of the repository's commit history. Newly-seen commits are recorded with their first-observation time and become available to subsequent calls. By default, that fetch keeps a persistent bare clone under `$XDG_CACHE_HOME/icebox.nvim/clones/`, so subsequent calls reuse the local objects instead of re-cloning.
+To keep startup fast when pinning many plugins, `thaw()` normally returns immediately against the current store contents rather than waiting for the network. A background job is scheduled at the same time to fetch new commits from upstream and record them, together with their observation time, into the local store. As an exception, the first call for a given (URL, range) pair fetches synchronously so the store has something to resolve against.
 
 To customize a call, pass an options table as the second argument (or as the first argument if you omit the URL). The recognized keys are:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `url` | string | The Git URL, useful with the single-table form `thaw(opts)`. Mutually exclusive with the positional `url` argument and `clone_path`. |
-| `clone_path` | string | Absolute path to an existing clone maintained by another tool (e.g. your plugin manager). The upstream URL is read from that clone's `origin` remote, and its objects are reused for `branch` history in place of icebox's own cache. Mutually exclusive with the positional `url` argument and `opts.url`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
+| `clone_path` | string | Path to an existing clone maintained by another tool (e.g. your plugin manager). The upstream URL is read from that clone's `origin` remote, and its objects are reused for `branch` history in place of icebox's own cache. Mutually exclusive with the positional `url` argument and `opts.url`. See [`doc/icebox.txt`](doc/icebox.txt) for details. |
 | `branch` | string | Newest-first history of that branch, capped at `branch_commits_per_fetch` commits. |
 | `version` | string | All tags in the store whose semver matches the range (`^1.0.0`, `~1.2.3`, `>=2.0.0`, …). Highest match wins among cooled tags. |
 | `trusted_commit` | string | Hash trusted by the user. Bypasses the cooldown only when it belongs to the candidate set. See [`doc/icebox.txt`](doc/icebox.txt) for the full resolution rules. |
@@ -96,7 +94,7 @@ The value returned when no cooled commit is available or an error occurs. It is 
 
 ### `icebox.lazy.cooldown(spec)`
 
-Helper for lazy.nvim. Given a lazy plugin spec, if `spec.icebox_options` is set, it calls `thaw(spec[1] or spec.url or spec.dir, spec.icebox_options)` and pins the returned commit onto the spec before returning it.
+Helper for lazy.nvim. Given a lazy plugin spec, if `spec.icebox_options` is set, it calls `thaw(spec[1] or spec.url or spec.dir, spec.icebox_options)` and writes the returned commit hash to `spec.commit` (overwriting any existing value) before returning the spec.
 
 ```lua
 local cooldown = require("icebox.lazy").cooldown
@@ -114,25 +112,28 @@ require("lazy").setup(vim.tbl_map(cooldown, {
 thaw request
       │
       1. sync fetch when the store file does not exist for this URL
-      2. sync fetch when the store exists but this (branch/version/fallback)
-         route has never been fetched before
+      2. sync fetch when the store exists but this (URL, range) pair
+         has never been fetched before
       3. otherwise schedule a background fetch after step 6 returns
-      4. build the candidate set from opts (branch history / tags in range /
-         fallback to tags if any, else the default branch)
+      4. build the candidate set from the specified range
+         (branch history, tags matching the version range, or the
+         default range when both are omitted)
       5. if trust_auto_pin is on and no pin exists yet, record candidates[1]
-         as the auto pin for this (URL, route)
+         as the auto pin for this (URL, range)
       6. return the "newest" candidate (smallest index in the array) among:
          - the newest cooled commit
          - trusted_commit (when it is in the candidate set)
          - auto_pin (when trust_auto_pin is on and it is in the set)
-      Falls back to ZERO_HASH when none of the three sources yields an in-set hash.
+      Returns ZERO_HASH when none of the three sources yields an in-set hash.
 ```
 
 Steps 1 and 2 block on their sync fetch, so a brand-new repository or a
-newly-added route pays a startup cost on that one call. Every later call
+newly-added range pays a startup cost on that one call. Every later call
 skips the sync fetch and only enqueues the async refresh in step 3.
 
-The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository. Auto pins and the "has this route been fetched" flag live in the same file.
+The commit hashes and their first-observation times are persisted under `$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository. Auto pins and the "has this range been fetched" flag live in the same file.
+
+In addition to the store, background fetches keep a persistent bare clone under `$XDG_CACHE_HOME/icebox.nvim/clones/`. This lets subsequent fetches reuse the local objects instead of re-cloning.
 
 ## License
 

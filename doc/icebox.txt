@@ -5,21 +5,21 @@ License:  MIT
 Homepage: https://github.com/minoritea/icebox.nvim
 
 ==============================================================================
-CONTENTS                                                      *icebox-contents*
+CONTENTS                                                     *icebox-contents*
 
-  1. Introduction ....................................... |icebox-introduction|
-  2. Requirements ....................................... |icebox-requirements|
-  3. Installation ....................................... |icebox-installation|
-     Windows ........................................... |icebox-windows|
-  4. How it works ....................................... |icebox-how-it-works|
-  5. Setup .............................................. |icebox-setup|
-  6. API ................................................ |icebox-api|
-     icebox.setup() .................................... |icebox.setup()|
-       Options ......................................... |icebox-options|
-     icebox.thaw() ..................................... |icebox.thaw()|
-       thaw() opts ..................................... |icebox-thaw-opts|
-     icebox.ZERO_HASH .................................. |icebox.ZERO_HASH|
-     icebox.lazy.cooldown() ............................ |icebox.lazy.cooldown()|
+  1. Introduction ................................... |icebox-introduction|
+  2. Requirements ................................... |icebox-requirements|
+  3. Installation ................................... |icebox-installation|
+     Windows ........................................ |icebox-windows|
+  4. How it works ................................... |icebox-how-it-works|
+  5. Setup .......................................... |icebox-setup|
+  6. API ............................................ |icebox-api|
+     icebox.setup() ................................. |icebox.setup()|
+       Options ...................................... |icebox-options|
+     icebox.thaw() .................................. |icebox.thaw()|
+       thaw() opts .................................. |icebox-thaw-opts|
+     icebox.ZERO_HASH ............................... |icebox.ZERO_HASH|
+     icebox.lazy.cooldown() ......................... |icebox.lazy.cooldown()|
 
 ==============================================================================
 1. INTRODUCTION                                           *icebox-introduction*
@@ -83,9 +83,9 @@ To keep the store useful, |icebox.thaw()| fetches from upstream on demand:
     - When the store file does not yet exist (a new repository), a
       synchronous fetch runs before |icebox.thaw()| returns. Startup blocks
       briefly on this first call.
-    - When the store exists but the specific route (branch / version /
-      fallback) has not been fetched before, |icebox.thaw()| also runs a
-      synchronous fetch for that route on this call only.
+    - When the store exists but the specific range has not been fetched
+      before, |icebox.thaw()| also runs a synchronous fetch for that
+      range on this call only.
     - On every other call the fetch runs asynchronously in the background,
       so |icebox.thaw()| itself returns without waiting.
 
@@ -94,7 +94,7 @@ Once the store is up to date, icebox picks the commit as follows:
     1. Build the candidate set from opts:
        - `branch`  → commits on that branch (newest-first history)
        - `version` → tags whose semver matches the range
-       - neither   → tags if any semver tag exists, else the default branch
+       - neither → tags if any semver tag exists, else the default branch
     2. Return the "newest" hash in that candidate set among:
        - the newest commit that has cooled down
          (`fetched_at + cooldown_days <= now`),
@@ -106,6 +106,14 @@ Once the store is up to date, icebox picks the commit as follows:
 If none of the three sources yield an in-set hash, |icebox.ZERO_HASH| is
 returned. |icebox-thaw-opt-trust-auto-pin| covers how the auto pin is
 recorded and reused.
+
+The commit hashes and their first-observation times are persisted under
+`$XDG_DATA_HOME/icebox.nvim/`, one JSON store file per repository. Auto
+pins and the "has this range been fetched" flag live in the same file.
+
+In addition to the store, background fetches keep a persistent bare
+clone under `$XDG_CACHE_HOME/icebox.nvim/clones/`. This lets subsequent
+fetches reuse the local objects instead of re-cloning.
 
 ==============================================================================
 5. SETUP                                                        *icebox-setup*
@@ -151,7 +159,7 @@ trust_auto_pin                                   *icebox-opt-trust-auto-pin*
   Default: false
 
   When `true`, records the newest hash from the current candidate set as an
-  "auto pin" on the first thaw call for that route, and reuses it as a
+  "auto pin" on the first thaw call for that range, and reuses it as a
   cooldown-bypass hash on subsequent calls until a newer cooled hash is
   available.
 
@@ -166,9 +174,9 @@ trust_auto_pin                                   *icebox-opt-trust-auto-pin*
   it will pin that compromised commit. Only enable this option for plugins
   whose current upstream state you are willing to sign off on manually.
 
-  The pin is stored per (URL, route). It is written exactly once, on
+  The pin is stored per (URL, range). It is written exactly once, on
   the first thaw call where `trust_auto_pin` is on and the store has no
-  pin for that (URL, route) yet, and is not overwritten by later thaw
+  pin for that (URL, range) yet, and is not overwritten by later thaw
   calls. A different branch or version pins independently.
 
 branch_commits_per_fetch                *icebox-opt-branch-commits-per-fetch*
@@ -372,7 +380,8 @@ icebox.lazy.cooldown({spec})                          *icebox.lazy.cooldown()*
 
 Helper for lazy.nvim. Given a lazy plugin spec, if `spec.icebox_options`
 is set, it calls `thaw(spec[1] or spec.url or spec.dir, spec.icebox_options)`
-and pins the returned commit onto the spec before returning it.
+and writes the returned commit hash to `spec.commit` (overwriting any
+existing value) before returning the spec.
 
 Example: >lua
   local cooldown = require("icebox.lazy").cooldown

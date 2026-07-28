@@ -53,13 +53,13 @@ end
 --   thaw(url_string, opts_table)
 --   thaw(opts_table)
 --
--- Reads the first-observation timestamps stored locally for commits on the
--- requested source, and returns the newest cooled commit within that
--- range. Store refreshes happen in the background, so thaw() resolves
--- against whatever the store held at call time. Two exceptions run a
--- synchronous fetch instead: when the store has not been initialised yet,
--- and when this specific (url, route) combination is being called for the
--- first time.
+-- Reads the first-observation timestamps stored locally for the commits
+-- selected by the URL and range specified in the arguments, and returns
+-- the newest cooled commit within that selection. Store refreshes happen
+-- in the background, so thaw() resolves against whatever the store held
+-- at call time. Two exceptions run a synchronous fetch instead: when the
+-- store has not been initialised yet, and when this specific (URL, range)
+-- combination is being called for the first time.
 --
 -- Returns |icebox.ZERO_HASH| on failure. See |icebox.thaw()| in
 -- doc/icebox.txt for the full list of accepted opts.
@@ -142,9 +142,9 @@ function M.thaw(url_or_opts, opts)
 
     -- Identifier used to decide whether steps 1/2 have to run a sync fetch.
     -- Independent of the auto pin key that step 4 eventually settles on:
-    -- for the fallback route the sync fetch happens under the shared
-    -- "default" identifier because at this point the caller has not
-    -- committed to a branch or a version.
+    -- when neither branch nor version is specified the sync fetch happens
+    -- under the shared "default" identifier because at this point the
+    -- caller has not committed to a branch or a version.
     local initial_fetched_key
     if opts.branch then
       initial_fetched_key = "branch:" .. opts.branch
@@ -176,10 +176,10 @@ function M.thaw(url_or_opts, opts)
     local guarded_ok, guarded_err = pcall(function()
       local data = handle.data
 
-      -- Steps 1/2: sync fetch when this route has never been fetched
+      -- Steps 1/2: sync fetch when this range has never been fetched
       -- before. We never enter both branches on the same call:
       -- is_initial_fetched is monotonic and steps 1 and 2 are two names
-      -- for the same "first fetch for this route" condition (step 1
+      -- for the same "first fetch for this range" condition (step 1
       -- covers the fresh-store case because is_initial_fetched(...) is
       -- false on a brand-new empty store).
       local ran_sync_fetch = false
@@ -202,10 +202,10 @@ function M.thaw(url_or_opts, opts)
 
         store.merge(data, new_data)
         store.mark_initial_fetched(data, initial_fetched_key)
-        -- For the fallback route the fetch also fully populates whichever
-        -- concrete route the fallback ends up on; mark that route as
-        -- fetched too so a later thaw with `branch = <default>` does not
-        -- fire again.
+        -- When neither branch nor version is specified, the fetch also
+        -- fully populates whichever concrete range the default resolves
+        -- to. Mark that range as fetched too so a later thaw with
+        -- `branch = <default>` does not fire again.
         if initial_fetched_key == "default" then
           if store.has_semver_tags(data) then
             store.mark_initial_fetched(data, "version:>=0.0.0")
@@ -256,10 +256,10 @@ function M.thaw(url_or_opts, opts)
         end
       end
 
-      -- Step 4: pick the route we resolve against and collect its
-      -- candidate set. `opts` is never mutated; the fallback route is
-      -- only expressed via the local `auto_pin_key` and `candidates` we
-      -- set here.
+      -- Step 4: pick the range we resolve against and collect its
+      -- candidate set. `opts` is never mutated; when neither branch nor
+      -- version is specified, the default range is expressed only via
+      -- the local `auto_pin_key` and `candidates` we set here.
       local candidates
       local auto_pin_key
       if opts.branch then
@@ -281,7 +281,7 @@ function M.thaw(url_or_opts, opts)
 
       -- Step 5: read or write the auto pin. Only fires when the caller
       -- opted in via trust_auto_pin. The pin is written exactly once per
-      -- (URL, route). If one already exists we reuse it verbatim.
+      -- (URL, range). If one already exists we reuse it verbatim.
       local auto_pin
       if cfg.trust_auto_pin then
         auto_pin = store.get_auto_pin(data, auto_pin_key)

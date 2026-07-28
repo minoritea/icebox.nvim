@@ -306,11 +306,11 @@ local function merge_new_data(a, b)
   return a
 end
 
--- Fallback fetch pipeline used when the caller did not specify branch or
--- version. Runs `ls-remote --symref` to seed default_branch and tags.
+-- Default-range fetch pipeline used when the caller did not specify branch
+-- or version. Runs `ls-remote --symref` to seed default_branch and tags.
 -- When upstream has no semver tags, follows through with a branch fetch
--- against the discovered default_branch. Callers get a single new_data table
--- covering whichever route the fallback ends up on.
+-- against the discovered default_branch. Callers get a single new_data
+-- table covering whichever range the default resolves to.
 local function fetch_default_impl(url, opts, limit)
   local tags_data, tags_err = fetch_tags_impl(url)
   if not tags_data then return nil, tags_err end
@@ -319,8 +319,8 @@ local function fetch_default_impl(url, opts, limit)
     return tags_data
   end
 
-  -- No semver tags: fall back to a branch fetch against default_branch so the
-  -- caller can resolve a branch-route candidate set on the same thaw call.
+  -- No semver tags: fall back to a branch fetch against default_branch so
+  -- the caller can resolve a branch candidate set on the same thaw call.
   local branch = tags_data.default_branch
   if not branch then
     -- ls-remote gave us no symref; keep whatever tag info we managed to grab.
