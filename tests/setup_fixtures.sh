@@ -15,6 +15,11 @@ cd "$WORK_DIR"
 git init -q -b main
 git config user.email "test@icebox"
 git config user.name "Test"
+# Disable signing so commit hashes stay deterministic across developer
+# machines (a global commit.gpgsign / gpg.format=ssh would otherwise
+# embed a signature and change every hash the specs hard-code).
+git config commit.gpgsign false
+git config tag.gpgsign false
 
 # Commit 1 (older)
 echo "first" > file.txt

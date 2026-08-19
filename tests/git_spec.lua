@@ -1,15 +1,20 @@
 local h   = require("helpers")
 local git = require("icebox.git")
 
--- Deterministic hashes produced by setup_fixtures.sh
--- commit 1 (oldest, tagged v1.0.0)
-local HASH1 = "aa8a8ef72994fa7b4f5f07d02deded583af3f45d"
--- commit 2 (newest, tagged v1.1.0 + v2.0.0 annotated)
-local HASH2 = "d708048f457e3b2e95dce2671c9ba38f1d2e1706"
-
 -- Fixture dir is set by run_tests.sh via ICEBOX_FIXTURE_DIR env var.
 local fixture_dir = vim.env.ICEBOX_FIXTURE_DIR
 local repo_url    = "file://" .. fixture_dir .. "/repo.git"
+
+-- Resolve fixture tip hashes at runtime so a machine-local git config
+-- (e.g. commit.gpgsign) cannot desync the hard-coded expectations.
+local function fixture_rev(ref)
+  local out = vim.system({
+    "git", "--git-dir=" .. fixture_dir .. "/repo.git", "rev-parse", ref,
+  }, { text = true }):wait().stdout or ""
+  return out:match("^([0-9a-f]+)")
+end
+local HASH1 = fixture_rev("refs/tags/v1.0.0")  -- commit 1 (oldest)
+local HASH2 = fixture_rev("refs/heads/main")   -- commit 2 (newest)
 
 -- git.fetch_*_sync is now a pure network operation: it returns the raw
 -- new_data table (default_branch / fetched_at / branches / tags) and does
