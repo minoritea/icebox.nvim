@@ -319,6 +319,47 @@ do
   vim.fn.delete(isolated_bare, "rf")
 end
 
+-- Regression: working-tree path named FETCH_HEAD used to make the clone_path
+-- fetch fail with `fatal: ambiguous argument 'FETCH_HEAD': both revision and
+-- filename` during both sync and background fetches.
+h.suite("thaw clone_path: FETCH_HEAD working-tree collision")
+do
+  reset_all()
+  local isolated_bare = vim.fn.tempname() .. "-fh-bare.git"
+  vim.system({ "git", "clone", "--quiet", "--bare",
+               fixture_dir .. "/repo.git", isolated_bare },
+             { text = true }):wait()
+  local clone_path = vim.fn.tempname() .. "-fh-clone"
+  vim.system({ "git", "clone", "--quiet", isolated_bare, clone_path },
+             { text = true }):wait()
+  vim.fn.mkdir(clone_path .. "/FETCH_HEAD", "p")
+
+  icebox.setup({ cooldown_days = 0 })
+  local got = icebox.thaw({
+    clone_path = clone_path,
+    branch     = "main",
+  })
+  h.eq(got, HASH2, "clone_path thaw succeeds despite FETCH_HEAD path")
+
+  -- First call ran a sync fetch and marked initial_fetched; the next call
+  -- schedules a background fetch against the same clone_path.
+  local origin = require("icebox.git").origin_url(clone_path)
+  local got2 = icebox.thaw({
+    clone_path = clone_path,
+    branch     = "main",
+  })
+  h.eq(got2, HASH2, "bg-fetch thaw also succeeds despite FETCH_HEAD path")
+
+  local settled = vim.wait(5000, function()
+    local d = read_store(origin)
+    return d.branches["main"] and d.branches["main"][1] == HASH2
+  end, 20)
+  h.is_true(settled, "bg fetch completed without ambiguous-argument failure")
+
+  vim.fn.delete(clone_path,    "rf")
+  vim.fn.delete(isolated_bare, "rf")
+end
+
 h.suite("thaw clone_path: rejected when path missing")
 do
   reset_all()

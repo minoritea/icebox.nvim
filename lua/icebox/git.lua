@@ -99,12 +99,17 @@ local function rmdir_rf(path)
 end
 
 -- Build a git-log command that caps the number of commits returned.
+-- The trailing `--` forces git to treat `ref` as a revision, not a path.
+-- Without it, a working-tree file/directory with the same name as the ref
+-- (e.g. `FETCH_HEAD` under clone_path) yields:
+--   fatal: ambiguous argument 'FETCH_HEAD': both revision and filename
 local function build_log_cmd(dir, limit, ref)
   local cmd = { "git", "-C", dir, "log", "--first-parent", "--format=%H" }
   if limit then
     vim.list_extend(cmd, { "-n", tostring(limit) })
   end
   cmd[#cmd + 1] = ref or "HEAD"
+  cmd[#cmd + 1] = "--"
   return cmd
 end
 
@@ -191,8 +196,14 @@ local function fetch_branch_from_clone(url, branch, limit, clone_path)
   if health.code ~= 0 then
     return nil, "clone_path is not a git repository: " .. clone_path
   end
+  -- Always qualify the branch as refs/heads/<name>. A bare name is ambiguous
+  -- when the remote also has refs/tags/<name>: git fetch prefers the tag,
+  -- so we would record the wrong tip (and some git versions surface an
+  -- ambiguous-ref warning/error). Leaving branch nil fetches the remote HEAD.
   local fetch_cmd = { "git", "-C", clone_path, "fetch", "--no-tags", "--", url }
-  if branch then fetch_cmd[#fetch_cmd + 1] = branch end
+  if branch then
+    fetch_cmd[#fetch_cmd + 1] = "refs/heads/" .. branch
+  end
   local fr = run_cmd(fetch_cmd)
   if fr.code ~= 0 then
     return nil, "git fetch failed: " .. (fr.stderr or "")
