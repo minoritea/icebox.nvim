@@ -3,12 +3,19 @@ local config   = require("icebox.config")
 local store    = require("icebox.store")
 local icebox   = require("icebox")
 
--- Deterministic hashes produced by setup_fixtures.sh
-local HASH1 = "aa8a8ef72994fa7b4f5f07d02deded583af3f45d"  -- commit 1 (older, tagged v1.0.0)
-local HASH2 = "d708048f457e3b2e95dce2671c9ba38f1d2e1706"  -- commit 2 (newer, tagged v1.1.0 + v2.0.0)
-
 local fixture_dir = vim.env.ICEBOX_FIXTURE_DIR
 local repo_url    = "file://" .. fixture_dir .. "/repo.git"
+
+-- Resolve fixture tip hashes at runtime so a machine-local git config
+-- (e.g. commit.gpgsign) cannot desync the hard-coded expectations.
+local function fixture_rev(ref)
+  local out = vim.system({
+    "git", "--git-dir=" .. fixture_dir .. "/repo.git", "rev-parse", ref,
+  }, { text = true }):wait().stdout or ""
+  return out:match("^([0-9a-f]+)")
+end
+local HASH1 = fixture_rev("refs/tags/v1.0.0")  -- commit 1 (older)
+local HASH2 = fixture_rev("refs/heads/main")   -- commit 2 (newer)
 
 -- Purge on-disk state so each suite starts clean. Some suites work against
 -- URLs other than `repo_url` (e.g. isolated_bare origins for clone_path
@@ -319,6 +326,46 @@ do
   vim.fn.delete(isolated_bare, "rf")
 end
 
+-- Regression: working-tree path named FETCH_HEAD used to make the clone_path
+-- fetch fail with `fatal: ambiguous argument 'FETCH_HEAD': both revision and
+-- filename` during both sync and background fetches.
+h.suite("thaw clone_path: FETCH_HEAD working-tree collision")
+do
+  -- Drain pending bg fetches from prior suites before wiping on-disk state.
+  vim.wait(2000, function() return false end, 20)
+  reset_all()
+  local isolated_bare = vim.fn.tempname() .. "-fh-bare.git"
+  vim.system({ "git", "clone", "--quiet", "--bare",
+               fixture_dir .. "/repo.git", isolated_bare },
+             { text = true }):wait()
+  local clone_path = vim.fn.tempname() .. "-fh-clone"
+  vim.system({ "git", "clone", "--quiet", isolated_bare, clone_path },
+             { text = true }):wait()
+  vim.fn.mkdir(clone_path .. "/FETCH_HEAD", "p")
+
+  icebox.setup({ cooldown_days = 0 })
+  local got = icebox.thaw({
+    clone_path = clone_path,
+    branch     = "main",
+  })
+  h.eq(got, HASH2, "clone_path thaw succeeds despite FETCH_HEAD path")
+
+  -- First call ran a sync fetch and marked initial_fetched; the next call
+  -- schedules a background fetch against the same clone_path.
+  local got2 = icebox.thaw({
+    clone_path = clone_path,
+    branch     = "main",
+  })
+  h.eq(got2, HASH2, "bg-fetch thaw also succeeds despite FETCH_HEAD path")
+
+  -- Drain the scheduled bg fetch while clone_path still exists so it does
+  -- not race with the cleanup below.
+  vim.wait(2000, function() return false end, 20)
+
+  vim.fn.delete(clone_path,    "rf")
+  vim.fn.delete(isolated_bare, "rf")
+end
+
 h.suite("thaw clone_path: rejected when path missing")
 do
   reset_all()
@@ -542,6 +589,10 @@ local function build_tagless_bare()
   vim.system({ "git", "-C", work_dir, "config", "user.email", "test@icebox" },
              { text = true }):wait()
   vim.system({ "git", "-C", work_dir, "config", "user.name", "Test" },
+             { text = true }):wait()
+  vim.system({ "git", "-C", work_dir, "config", "commit.gpgsign", "false" },
+             { text = true }):wait()
+  vim.system({ "git", "-C", work_dir, "config", "tag.gpgsign", "false" },
              { text = true }):wait()
   local f = io.open(work_dir .. "/file.txt", "w"); f:write("hi\n"); f:close()
   vim.system({ "git", "-C", work_dir, "add", "file.txt" }, { text = true }):wait()

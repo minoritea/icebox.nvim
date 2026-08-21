@@ -98,13 +98,29 @@ local function rmdir_rf(path)
   vim.fn.delete(path, "rf")
 end
 
+local function normalize_fetch_ref(branch)
+  if not branch then return nil end
+  if branch:match("^refs/") then return branch end
+  return "refs/heads/" .. branch
+end
+
+local function normalize_clone_branch(branch)
+  if not branch then return nil end
+  return branch:match("^refs/heads/(.+)$") or branch
+end
+
 -- Build a git-log command that caps the number of commits returned.
+-- The trailing `--` forces git to treat `ref` as a revision, not a path.
+-- Without it, a working-tree file/directory with the same name as the ref
+-- (e.g. `FETCH_HEAD` under clone_path) yields:
+--   fatal: ambiguous argument 'FETCH_HEAD': both revision and filename
 local function build_log_cmd(dir, limit, ref)
   local cmd = { "git", "-C", dir, "log", "--first-parent", "--format=%H" }
   if limit then
     vim.list_extend(cmd, { "-n", tostring(limit) })
   end
   cmd[#cmd + 1] = ref or "HEAD"
+  cmd[#cmd + 1] = "--"
   return cmd
 end
 
@@ -114,8 +130,9 @@ end
 local function build_clone_cmd(url, branch, dest)
   local cmd = { "git", "clone", "--bare" }
   vim.list_extend(cmd, CLONE_SAFETY_ARGS)
-  if branch then
-    vim.list_extend(cmd, { "--branch", branch, "--single-branch" })
+  local clone_branch = normalize_clone_branch(branch)
+  if clone_branch then
+    vim.list_extend(cmd, { "--branch", clone_branch, "--single-branch" })
   end
   vim.list_extend(cmd, { "--", url, dest })
   return cmd
@@ -191,8 +208,14 @@ local function fetch_branch_from_clone(url, branch, limit, clone_path)
   if health.code ~= 0 then
     return nil, "clone_path is not a git repository: " .. clone_path
   end
+  -- Qualify bare branch names as refs/heads/<name>. A bare name is ambiguous
+  -- when the remote also has refs/tags/<name>: git fetch prefers the tag.
+  -- Leaving branch nil fetches the remote HEAD.
   local fetch_cmd = { "git", "-C", clone_path, "fetch", "--no-tags", "--", url }
-  if branch then fetch_cmd[#fetch_cmd + 1] = branch end
+  local fetch_ref = normalize_fetch_ref(branch)
+  if fetch_ref then
+    fetch_cmd[#fetch_cmd + 1] = fetch_ref
+  end
   local fr = run_cmd(fetch_cmd)
   if fr.code ~= 0 then
     return nil, "git fetch failed: " .. (fr.stderr or "")
@@ -216,7 +239,7 @@ end
 -- is wiped and a fresh clone is attempted.
 local function ensure_cache(cache_dir, url, branch)
   if is_healthy_repo(cache_dir) then
-    local ref = branch and ("refs/heads/" .. branch) or "HEAD"
+    local ref = normalize_fetch_ref(branch) or "HEAD"
     local fr = run_cmd({ "git", "-C", cache_dir, "fetch", "origin", ref })
     if fr.code == 0 then
       return "FETCH_HEAD"

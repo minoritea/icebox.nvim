@@ -1,15 +1,20 @@
 local h   = require("helpers")
 local git = require("icebox.git")
 
--- Deterministic hashes produced by setup_fixtures.sh
--- commit 1 (oldest, tagged v1.0.0)
-local HASH1 = "aa8a8ef72994fa7b4f5f07d02deded583af3f45d"
--- commit 2 (newest, tagged v1.1.0 + v2.0.0 annotated)
-local HASH2 = "d708048f457e3b2e95dce2671c9ba38f1d2e1706"
-
 -- Fixture dir is set by run_tests.sh via ICEBOX_FIXTURE_DIR env var.
 local fixture_dir = vim.env.ICEBOX_FIXTURE_DIR
 local repo_url    = "file://" .. fixture_dir .. "/repo.git"
+
+-- Resolve fixture tip hashes at runtime so a machine-local git config
+-- (e.g. commit.gpgsign) cannot desync the hard-coded expectations.
+local function fixture_rev(ref)
+  local out = vim.system({
+    "git", "--git-dir=" .. fixture_dir .. "/repo.git", "rev-parse", ref,
+  }, { text = true }):wait().stdout or ""
+  return out:match("^([0-9a-f]+)")
+end
+local HASH1 = fixture_rev("refs/tags/v1.0.0")  -- commit 1 (oldest)
+local HASH2 = fixture_rev("refs/heads/main")   -- commit 2 (newest)
 
 -- git.fetch_*_sync is now a pure network operation: it returns the raw
 -- new_data table (default_branch / fetched_at / branches / tags) and does
@@ -96,6 +101,69 @@ do
   local data, err = git.fetch_tags_sync("file:///nonexistent/path.git")
   h.is_nil(data, "no data on error")
   h.not_nil(err, "error returned")
+end
+
+-- Regression: a working-tree path named FETCH_HEAD must not make
+-- `git log FETCH_HEAD` fail with "ambiguous argument ... both revision and
+-- filename". thaw()'s clone_path / background-fetch path hits this log.
+h.suite("git.fetch_branch_sync clone_path: FETCH_HEAD path collision")
+do
+  local isolated_bare = vim.fn.tempname() .. "-ambig-bare.git"
+  vim.system({ "git", "clone", "--quiet", "--bare",
+               fixture_dir .. "/repo.git", isolated_bare },
+             { text = true }):wait()
+  local clone_path = vim.fn.tempname() .. "-ambig-clone"
+  vim.system({ "git", "clone", "--quiet", isolated_bare, clone_path },
+             { text = true }):wait()
+  -- Create a working-tree directory that collides with the FETCH_HEAD ref name.
+  vim.fn.mkdir(clone_path .. "/FETCH_HEAD", "p")
+
+  local data, err = git.fetch_branch_sync(
+    "file://" .. isolated_bare, "main", nil, { clone_path = clone_path })
+  h.is_nil(err, "no ambiguous-argument error when FETCH_HEAD path exists")
+  h.not_nil(data, "data returned despite FETCH_HEAD path collision")
+  h.eq(data and data.branches.main and data.branches.main[1], HASH2,
+       "newest commit still resolved")
+
+  vim.fn.delete(clone_path, "rf")
+  vim.fn.delete(isolated_bare, "rf")
+end
+
+-- Regression: when the remote has both refs/heads/X and refs/tags/X with
+-- different tips, a bare branch name makes git fetch prefer the tag.
+-- icebox must qualify as refs/heads/X so the branch tip is recorded.
+h.suite("git.fetch_branch_sync clone_path: branch wins over same-named tag")
+do
+  local isolated_bare = vim.fn.tempname() .. "-tagbranch-bare.git"
+  vim.system({ "git", "clone", "--quiet", "--bare",
+               fixture_dir .. "/repo.git", isolated_bare },
+             { text = true }):wait()
+
+  -- Point tag "main" at the older commit while branch "main" stays at HASH2.
+  vim.system({ "git", "--git-dir=" .. isolated_bare,
+               "tag", "-f", "main", HASH1 }, { text = true }):wait()
+  local tag_tip = vim.system({ "git", "--git-dir=" .. isolated_bare,
+                               "rev-parse", "refs/tags/main" },
+                             { text = true }):wait().stdout or ""
+  local branch_tip = vim.system({ "git", "--git-dir=" .. isolated_bare,
+                                  "rev-parse", "refs/heads/main" },
+                                { text = true }):wait().stdout or ""
+  h.eq(tag_tip:match("^([0-9a-f]+)"), HASH1, "tag main → HASH1")
+  h.eq(branch_tip:match("^([0-9a-f]+)"), HASH2, "branch main → HASH2")
+
+  local clone_path = vim.fn.tempname() .. "-tagbranch-clone"
+  vim.system({ "git", "clone", "--quiet", isolated_bare, clone_path },
+             { text = true }):wait()
+
+  local data, err = git.fetch_branch_sync(
+    "file://" .. isolated_bare, "main", nil, { clone_path = clone_path })
+  h.is_nil(err, "fetch with colliding tag/branch succeeds")
+  h.not_nil(data, "data returned")
+  h.eq(data and data.branches.main and data.branches.main[1], HASH2,
+       "branch tip preferred over same-named tag")
+
+  vim.fn.delete(clone_path, "rf")
+  vim.fn.delete(isolated_bare, "rf")
 end
 
 h.summary()
